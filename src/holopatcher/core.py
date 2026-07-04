@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import uuid
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,7 +18,7 @@ from pykotor.extract.file import ResourceIdentifier
 from pykotor.tools.encoding import decode_bytes_with_fallbacks
 from pykotor.tools.path import CaseAwarePath, find_kotor_paths_from_default
 from pykotor.tslpatcher.config import LogLevel
-from pykotor.tslpatcher.patcher import ModInstaller
+from pykotor.tslpatcher.patcher import ModInstaller, is_capsule_file
 from pykotor.tslpatcher.reader import ConfigReader, NamespaceReader
 from pykotor.tslpatcher.uninstall import ModUninstaller
 from utility.string_util import striprtf
@@ -431,6 +432,332 @@ def get_confirm_message(installer: ModInstaller) -> str | None:
     return msg if msg and msg != "N/A" else None
 
 
+_CANONICAL_LOWERCASE_GAME_ROOT_DIRS = {"modules", "override"}
+
+
+def _split_relative_path(path_value: str) -> list[str]:
+    normalized_path = CaseAwarePath.str_norm(path_value, slash="/")
+    if normalized_path in {"", "."}:
+        return []
+    return [part for part in normalized_path.split("/") if part and part != "."]
+
+
+def _join_relative_path(parts: list[str], slash: str | None = None) -> str:
+    if not parts:
+        return "."
+
+    output_slash = os.sep if slash is None else slash
+    if output_slash not in {"\\", "/"}:
+        raise ValueError(f"Invalid slash str: '{output_slash}'")
+    return output_slash.join(parts)
+
+
+def _case_matching_existing_directory(parent: Path, directory_name: str) -> str | None:
+    if directory_name in {"", ".", ".."} or not parent.is_dir():
+        return None
+
+    matches: list[str] = []
+    try:
+        for child in parent.iterdir():
+            if child.name.lower() == directory_name.lower() and child.is_dir():
+                matches.append(child.name)
+    except OSError:
+        return None
+
+    if not matches:
+        return None
+
+    lower_name = directory_name.lower()
+    for candidate in matches:
+        if candidate == lower_name:
+            return candidate
+    for candidate in matches:
+        if candidate == directory_name:
+            return candidate
+    return sorted(matches, key=lambda item: (item.lower() != lower_name, item))[0]
+
+
+def _relative_parts_under_directory(
+    path_value: os.PathLike | str,
+    directory: os.PathLike | str,
+) -> list[str] | None:
+    path_abs = os.path.abspath(os.fspath(path_value))
+    directory_abs = os.path.abspath(os.fspath(directory))
+
+    try:
+        common_path = os.path.commonpath([path_abs.lower(), directory_abs.lower()])
+    except ValueError:
+        return None
+
+    if common_path != directory_abs.lower():
+        return None
+
+    relative_path = os.path.relpath(path_abs, directory_abs)
+    if relative_path in {"", "."}:
+        return []
+    if relative_path == os.pardir or relative_path.startswith(os.pardir + os.sep):
+        return None
+    return _split_relative_path(relative_path)
+
+
+def _directory_case_key(parts: list[str]) -> tuple[str, ...]:
+    return tuple(part.lower() for part in parts)
+
+
+class _DirectoryCaseResolver:
+    """Resolve directory casing generically without forcing new directories lowercase.
+
+    Existing directories always win, regardless of which directory name a mod
+    instruction uses. For directories that do not exist yet, preserve the first
+    casing seen for that relative directory path and reuse it for later patch
+    entries. This prevents one entry from using ``CustomFolder`` while another
+    entry writes to ``customfolder`` during the same install, without globally
+    lowercasing custom directory names.
+    """
+
+    def __init__(self, game_root: os.PathLike | str):
+        self.game_root = Path(CaseAwarePath(game_root))
+        self._planned_directory_casing: dict[tuple[str, ...], str] = {}
+
+    def normalize_relative_output_path(
+        self,
+        path_value: str,
+        base_directory: os.PathLike | str,
+        *,
+        lowercase_leaf: bool,
+        leaf_is_directory: bool,
+        path_separator: str | None = None,
+    ) -> str:
+        """Normalize an output path without blindly lowercasing directory names.
+
+        Every directory component is matched case-insensitively against existing
+        directories under its parent. This is generic: it applies to arbitrary
+        directories, not only to ``modules`` and ``override``. New custom
+        directories keep their authored casing, with the first casing seen for
+        that relative path reused throughout the install. The returned path uses
+        the requested separator, or the current platform separator by default.
+        """
+        parts = _split_relative_path(path_value)
+        if not parts:
+            return "."
+
+        base_path = Path(CaseAwarePath(base_directory))
+        base_parts = self._resolve_base_directory_parts(base_path)
+        current_path = (
+            self._path_from_game_root(base_parts) if base_parts is not None else base_path
+        )
+        parent_parts = list(base_parts) if base_parts is not None else None
+        directory_part_count = len(parts) if leaf_is_directory else max(len(parts) - 1, 0)
+
+        normalized_parts: list[str] = []
+        for part in parts[:directory_part_count]:
+            is_game_root_child = parent_parts == []
+            resolved_part = self._resolve_directory_part(
+                current_path,
+                parent_parts,
+                part,
+                is_game_root_child=is_game_root_child,
+            )
+            normalized_parts.append(resolved_part)
+            if parent_parts is not None:
+                parent_parts.append(resolved_part)
+            current_path = current_path / resolved_part
+
+        if not leaf_is_directory:
+            leaf_name = parts[-1].lower() if lowercase_leaf else parts[-1]
+            normalized_parts.append(leaf_name)
+
+        return _join_relative_path(normalized_parts, path_separator)
+
+    def _resolve_base_directory_parts(self, base_path: Path) -> list[str] | None:
+        raw_base_parts = _relative_parts_under_directory(base_path, self.game_root)
+        if raw_base_parts is None:
+            return None
+
+        resolved_base_parts: list[str] = []
+        current_path = self.game_root
+        for part in raw_base_parts:
+            resolved_part = self._resolve_directory_part(
+                current_path,
+                resolved_base_parts,
+                part,
+                is_game_root_child=not resolved_base_parts,
+            )
+            resolved_base_parts.append(resolved_part)
+            current_path = current_path / resolved_part
+        return resolved_base_parts
+
+    def _resolve_directory_part(
+        self,
+        current_path: Path,
+        parent_parts: list[str] | None,
+        part: str,
+        *,
+        is_game_root_child: bool,
+    ) -> str:
+        resolved_part = _case_matching_existing_directory(current_path, part)
+        planned_key = (
+            _directory_case_key([*parent_parts, part])
+            if parent_parts is not None
+            else None
+        )
+
+        if resolved_part is None and planned_key is not None:
+            resolved_part = self._planned_directory_casing.get(planned_key)
+        if (
+            resolved_part is None
+            and is_game_root_child
+            and part.lower() in _CANONICAL_LOWERCASE_GAME_ROOT_DIRS
+        ):
+            resolved_part = part.lower()
+        if resolved_part is None:
+            resolved_part = part
+
+        if planned_key is not None:
+            self._planned_directory_casing[planned_key] = resolved_part
+        return resolved_part
+
+    def _path_from_game_root(self, parts: list[str]) -> Path:
+        path = self.game_root
+        for part in parts:
+            path = path / part
+        return path
+
+
+def _normalize_install_destination(
+    destination: str,
+    game_root: os.PathLike | str,
+    directory_case_resolver: _DirectoryCaseResolver | None = None,
+) -> str:
+    resolver = directory_case_resolver or _DirectoryCaseResolver(game_root)
+    destination_is_capsule = is_capsule_file(destination)
+    return resolver.normalize_relative_output_path(
+        destination,
+        game_root,
+        lowercase_leaf=destination_is_capsule,
+        leaf_is_directory=not destination_is_capsule,
+        path_separator=os.sep,
+    )
+
+
+def _normalize_install_saveas(
+    saveas: str,
+    game_root: os.PathLike | str,
+    destination: str,
+    directory_case_resolver: _DirectoryCaseResolver | None = None,
+) -> str:
+    resolver = directory_case_resolver or _DirectoryCaseResolver(game_root)
+    if is_capsule_file(destination):
+        return resolver.normalize_relative_output_path(
+            saveas,
+            game_root,
+            lowercase_leaf=True,
+            leaf_is_directory=False,
+            path_separator=os.sep,
+        )
+
+    destination_base = Path(CaseAwarePath(game_root))
+    if destination != ".":
+        destination_base = destination_base / destination
+    return resolver.normalize_relative_output_path(
+        saveas,
+        destination_base,
+        lowercase_leaf=True,
+        leaf_is_directory=False,
+        path_separator=os.sep,
+    )
+
+
+def force_lowercase_install_filenames(
+    installer: ModInstaller,
+    logger: PatchLogger | None = None,
+) -> int:
+    """Normalize installer output filenames without forcing directory casing.
+
+    The native Linux KotOR II executable resolves loose files using lowercase
+    filenames. TSLPatcher mods are often authored on case-insensitive
+    filesystems and may request mixed-case output paths; normalize output
+    filenames before PyKotor writes files or archive resources.
+
+    Directory components are not blindly lowercased. Instead, every directory
+    component is matched case-insensitively against existing directories under
+    its parent, and the already-existing casing is reused. This applies to any
+    directory, not only to ``modules`` and ``override``. Directories that the
+    mod creates keep the first casing seen for that relative directory path, so
+    later mod instructions cannot introduce a second case variant accidentally.
+    Normalized installer path strings use the current platform separator, so
+    Windows installs keep backslash-style TSLPatcher paths.
+
+    Source filenames are intentionally left unchanged so mixed-case mod packages
+    can still be read through CaseAwarePath.
+
+    Args:
+    ----
+        installer: The installer whose loaded config should be normalized.
+        logger: Optional patch logger for install-log notes.
+
+    Returns:
+    -------
+        int: Number of patch entries whose output path or filename changed.
+    """
+    config = installer.config()
+    game_root = getattr(installer, "game_path", ".")
+    directory_case_resolver = _DirectoryCaseResolver(game_root)
+    patches = [
+        *config.install_list,
+        config.patches_tlk,
+        *config.patches_2da,
+        *config.patches_gff,
+        *config.patches_nss,
+        *config.patches_ncs,
+        *config.patches_ssf,
+    ]
+
+    changed_entries = 0
+    for patch in patches:
+        changed_fields: list[str] = []
+
+        destination = getattr(patch, "destination", None)
+        if isinstance(destination, str):
+            normalized_destination = _normalize_install_destination(
+                destination, game_root, directory_case_resolver
+            )
+            if destination != normalized_destination:
+                setattr(patch, "destination", normalized_destination)
+                changed_fields.append(
+                    f"destination: '{destination}' -> '{normalized_destination}'"
+                )
+                destination = normalized_destination
+
+        saveas = getattr(patch, "saveas", None)
+        if isinstance(saveas, str):
+            normalized_saveas = _normalize_install_saveas(
+                saveas,
+                game_root,
+                destination if isinstance(destination, str) else ".",
+                directory_case_resolver,
+            )
+            if saveas != normalized_saveas:
+                setattr(patch, "saveas", normalized_saveas)
+                changed_fields.append(f"saveas: '{saveas}' -> '{normalized_saveas}'")
+
+        if changed_fields:
+            changed_entries += 1
+            if logger is not None:
+                logger.add_verbose(
+                    f"Normalizing {patch.__class__.__name__} output name(s): "
+                    + "; ".join(changed_fields)
+                )
+
+    if changed_entries and logger is not None:
+        logger.add_note(
+            f"Normalized output filenames and preserved directory casing for "
+            f"{changed_entries} patch {'entry' if changed_entries == 1 else 'entries'}."
+        )
+
+    return changed_entries
+
+
 def install_mod(
     mod_path: str,
     game_path: str,
@@ -473,9 +800,11 @@ def install_mod(
 
     installer = ModInstaller(namespace_mod_path, game_path, ini_file_path, logger)
     installer.tslpatchdata_path = tslpatchdata_path
+    force_lowercase_install_filenames(installer, logger)
 
     install_start_time: datetime = datetime.now(timezone.utc).astimezone()
     installer.install(should_cancel, progress_callback)
+    lowercase_directory(game_path, logger, include_root=False, log_each=False)
     total_install_time: timedelta = datetime.now(timezone.utc).astimezone() - install_start_time
 
     num_errors: int = len(logger.errors)
@@ -554,40 +883,108 @@ def uninstall_mod(
     return uninstaller.uninstall_selected_mod()
 
 
+def _same_filesystem_entry(left: Path, right: Path) -> bool:
+    try:
+        return left.exists() and right.exists() and left.samefile(right)
+    except OSError:
+        return False
+
+
+def _rename_path_to_lowercase(
+    path: Path,
+    logger: PatchLogger,
+    *,
+    log_each: bool = True,
+) -> bool:
+    lowercase_path = path.with_name(path.name.lower())
+    if path.name == lowercase_path.name:
+        return False
+
+    try:
+        target_exists = lowercase_path.exists()
+        target_is_same_entry = target_exists and _same_filesystem_entry(path, lowercase_path)
+        if target_exists and not target_is_same_entry:
+            logger.add_error(
+                f"Cannot rename '{path}' to '{lowercase_path.name}' because the lowercase target "
+                "already exists. Resolve this filename collision manually."
+            )
+            return False
+
+        if log_each:
+            logger.add_note(f"Renaming {path} to '{lowercase_path.name}'")
+
+        if target_is_same_entry:
+            temp_path = path.with_name(f".holopatcher_case_tmp_{uuid.uuid4().hex}")
+            path.rename(temp_path)
+            temp_path.rename(lowercase_path)
+        else:
+            path.rename(lowercase_path)
+    except OSError as e:
+        logger.add_error(
+            f"Could not rename '{path}' to '{lowercase_path.name}': "
+            f"{e.__class__.__name__}: {e}"
+        )
+        return False
+    return True
+
+
 def lowercase_directory(
     directory: str,
     logger: PatchLogger,
+    *,
+    include_root: bool = False,
+    include_directories: bool = False,
+    log_each: bool = True,
 ) -> bool:
-    """Convert all files and folders in a directory to lowercase.
+    """Convert files in a directory tree to lowercase.
 
     Args:
     ----
         directory: Directory to process
         logger: Logger instance
+        include_root: Whether to lowercase the selected directory itself. Ignored
+            unless include_directories is also True.
+        include_directories: Whether to also lowercase directories. This is off
+            by default so install cleanup does not rename game folders such as
+            modules/override.
+        log_each: Whether to add a note for each renamed filesystem entry
 
     Returns:
     -------
         bool: True if any changes were made
     """
-    made_change: bool = False
-    for root, dirs, files in os.walk(str(directory), topdown=False):
+    directory_path = Path(CaseAwarePath(directory))
+    made_change = False
+    rename_count = 0
+    for root, dirs, files in os.walk(str(directory_path), topdown=False):
         for file_name in files:
             file_path: Path = Path(root, file_name)
-            new_file_path: Path = Path(root, file_name.lower())
-            if str(file_path) != str(new_file_path):
-                logger.add_note(f"Renaming {file_path} to '{new_file_path.name}'")
-                file_path.rename(new_file_path)
+            if _rename_path_to_lowercase(file_path, logger, log_each=log_each):
                 made_change = True
+                rename_count += 1
 
-        for folder_name in dirs:
-            dir_path: Path = Path(root, folder_name)
-            new_dir_path: Path = Path(root, folder_name.lower())
-            if str(dir_path) != str(new_dir_path):
-                logger.add_note(f"Renaming {dir_path} to '{new_dir_path.name}'")
-                dir_path.rename(new_dir_path)
-                made_change = True
+        if include_directories:
+            for folder_name in dirs:
+                dir_path: Path = Path(root, folder_name)
+                if _rename_path_to_lowercase(dir_path, logger, log_each=log_each):
+                    made_change = True
+                    rename_count += 1
 
-    Path(directory).rename(Path.str_norm(str(directory).lower()))
+    if (
+        include_directories
+        and include_root
+        and _rename_path_to_lowercase(directory_path, logger, log_each=log_each)
+    ):
+        made_change = True
+        rename_count += 1
+
+    if rename_count and not log_each:
+        entry_type = "filesystem entry" if include_directories else "file"
+        logger.add_note(
+            f"Lowercased {rename_count} {entry_type}"
+            f"{'' if rename_count == 1 else 's'} under '{directory_path}'."
+        )
+
     return made_change
 
 
