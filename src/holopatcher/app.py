@@ -186,7 +186,7 @@ class App(BaseApp):
             label="Fix permissions to file/folder...", command=self.fix_permissions
         )
         tools_menu.add_command(
-            label="Fix iOS Case Sensitivity", command=self.lowercase_files_and_folders
+            label="Force Lowercase Filenames", command=self.lowercase_files_and_folders
         )
         tools_menu.add_command(label="Create info.rte...", command=self.create_rte_content)
         self.menu_bar.add_cascade(label="Tools", menu=tools_menu)
@@ -752,42 +752,16 @@ class App(BaseApp):
                 self.logger.add_note("Please wait, this may take awhile...")
                 made_change = False
                 try:
-                    for root, dirs, files in os.walk(str(directory), topdown=False):
-                        # Renaming files
-                        for file_name in files:
-                            file_path: Path = Path(root, file_name)
-                            new_file_path: Path = Path(root, file_name.lower())
-                            str_file_path = str(file_path)
-                            str_new_file_path = str(new_file_path)
-                            if str_file_path != str_new_file_path:
-                                self.logger.add_note(
-                                    f"Renaming {str_file_path} to '{new_file_path.name}'"
-                                )
-                                file_path.rename(new_file_path)
-                                made_change = True
-
-                        # Renaming directories
-                        for folder_name in dirs:
-                            dir_path: Path = Path(root, folder_name)
-                            new_dir_path: Path = Path(root, folder_name.lower())
-                            str_dir_path = str(dir_path)
-                            str_new_dir_path = str(new_dir_path)
-                            if str_dir_path != str_new_dir_path:
-                                self.logger.add_note(
-                                    f"Renaming {str_dir_path} to '{new_dir_path.name}'"
-                                )
-                                dir_path.rename(str_new_dir_path)
-                                made_change = True
-                    Path(directory).rename(str(directory).lower())
+                    made_change = core.lowercase_directory(str(directory), self.logger)
                 except Exception as e:  # noqa: BLE001
                     self._handle_general_exception(e)
                 finally:
                     self.set_state(state=False)
                     if not made_change:
                         self.logger.add_note(
-                            "Nothing to change - all files/folders already correct case."
+                            "Nothing to change - all filenames already lowercase."
                         )
-                    self.logger.add_note("iOS case rename task completed.")
+                    self.logger.add_note("Lowercase filename task completed.")
 
             self.task_thread = Thread(target=task, name="lowercase_tool_task")
             self.task_thread.start()
@@ -796,7 +770,7 @@ class App(BaseApp):
         finally:
             if reset_namespace and self.mod_path:
                 self.on_namespace_option_chosen(tk.Event())
-            self.logger.add_verbose("iOS case rename task started.")
+            self.logger.add_verbose("Lowercase filename task started.")
 
     def on_namespace_option_chosen(
         self,
@@ -1370,6 +1344,7 @@ class App(BaseApp):
                 )
             ):
                 return
+            core.force_lowercase_install_filenames(installer, self.logger)
             if progress_update_func is not None:
                 assert self.progress_bar is not None, "Progress bar is None"
                 self.progress_bar["maximum"] = len(
@@ -1387,6 +1362,9 @@ class App(BaseApp):
             # profiler.enable()
             install_start_time: datetime = datetime.now(timezone.utc).astimezone()
             installer.install(should_cancel_thread, progress_update_func)
+            core.lowercase_directory(
+                self.gamepaths.get(), self.logger, include_root=False, log_each=False
+            )
             total_install_time: timedelta = (
                 datetime.now(timezone.utc).astimezone() - install_start_time
             )
