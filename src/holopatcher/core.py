@@ -22,6 +22,7 @@ from pykotor.tslpatcher.patcher import ModInstaller, is_capsule_file
 from pykotor.tslpatcher.reader import ConfigReader, NamespaceReader
 from pykotor.tslpatcher.uninstall import ModUninstaller
 from utility.string_util import striprtf
+from utility.system.path import Path as UtilityPath
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -261,9 +262,10 @@ def check_directory_access(
         def filter_func(x: Path) -> bool:
             return not ResourceIdentifier.from_path(x).restype.is_invalid
 
-        return directory.has_access(recurse=recurse, filter_results=filter_func)
+        # Wrap directory in UtilityPath so has_access is guaranteed to exist
+        return UtilityPath(directory).has_access(recurse=recurse, filter_results=filter_func)
 
-    return directory.has_access(recurse=recurse)
+    return UtilityPath(directory).has_access(recurse=recurse)
 
 
 def validate_install_paths(
@@ -1007,8 +1009,8 @@ def gain_directory_access(
     ------
         PermissionError: If access cannot be gained
     """
-    path: Path = Path(directory)
-    access: bool = path.gain_access(recurse=True, log_func=logger.add_verbose)
+    path: CaseAwarePath = CaseAwarePath(directory)
+    access: bool = UtilityPath(path).gain_access(recurse=True, log_func=logger.add_verbose)
     if not access:
         raise PermissionError(f"Permission denied to {directory}")
 
