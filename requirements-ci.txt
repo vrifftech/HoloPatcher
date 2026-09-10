@@ -1,0 +1,4 @@
+# The fork action installs PyInstaller after these dependencies.
+-r requirements-build.txt
+pytest>=7,<10
+typing-extensions>=4.8

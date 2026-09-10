@@ -906,6 +906,12 @@ class App(tk.Tk):
     def _launch_directory() -> pathlib.Path:
         if getattr(sys, "frozen", False):
             executable = pathlib.Path(sys.executable).resolve()
+            # AppImage's executable lives inside a read-only mount or temporary
+            # extraction directory. Search beside the user's AppImage instead.
+            if sys.platform.startswith("linux"):
+                appimage, appdir = os.environ.get("APPIMAGE"), os.environ.get("APPDIR")
+                if appimage and appdir and executable.is_relative_to(pathlib.Path(appdir).resolve()):
+                    return pathlib.Path(appimage).resolve().parent
             if sys.platform == "darwin":
                 bundle = next((p for p in executable.parents if p.suffix.lower() == ".app"), None)
                 if bundle is not None:

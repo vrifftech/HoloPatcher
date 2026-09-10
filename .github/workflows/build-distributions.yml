@@ -1,0 +1,237 @@
+name: Build onefile distributions with fresh PyInstaller
+
+on:
+  workflow_dispatch:
+    inputs:
+      pykotor_ref:
+        description: Backend branch, tag or SHA (empty uses PYKOTOR_REF variable, then repo default).
+        required: false
+        type: string
+      pyinstaller_ref:
+        description: Fork branch, tag or SHA containing the fresh-pyinstaller action (empty uses repo variable/default).
+        required: false
+        type: string
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve dependency commits once for all platforms
+    runs-on: ubuntu-22.04
+    outputs:
+      pykotor_repository: ${{ steps.refs.outputs.pykotor_repository }}
+      pyinstaller_repository: ${{ steps.refs.outputs.pyinstaller_repository }}
+      pykotor_sha: ${{ steps.refs.outputs.pykotor_sha }}
+      pyinstaller_sha: ${{ steps.refs.outputs.pyinstaller_sha }}
+    env:
+      PYKOTOR_REPOSITORY: ${{ vars.PYKOTOR_REPOSITORY || format('{0}/PyKotor', github.repository_owner) }}
+      PYINSTALLER_REPOSITORY: ${{ vars.PYINSTALLER_REPOSITORY || format('{0}/pyinstaller', github.repository_owner) }}
+    steps:
+      - name: Resolve the selected audited backend
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.PYKOTOR_REPOSITORY }}
+          ref: ${{ inputs.pykotor_ref || vars.PYKOTOR_REF }}
+          path: PyKotor
+          token: ${{ secrets.SOURCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Resolve our PyInstaller source fork
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.PYINSTALLER_REPOSITORY }}
+          ref: ${{ inputs.pyinstaller_ref || vars.PYINSTALLER_REF }}
+          path: _pyinstaller
+          token: ${{ secrets.SOURCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Validate layout and record commits
+        id: refs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d PyKotor/Libraries/PyKotor/src/pykotor
+          test -d PyKotor/Libraries/Utility/src/utility
+          if ! test -f PyKotor/Libraries/PyKotor/src/pykotor/__pyinstaller/hook-pykotor.resource.formats.ncs.compiler.py; then
+            echo 'Apply the PyKotor packaging patch and select that commit.' >&2
+            exit 1
+          fi
+          test -f _pyinstaller/bootloader/waf
+          if ! test -f _pyinstaller/.github/actions/fresh-pyinstaller/action.yml; then
+            echo 'Add the supplied fresh-pyinstaller action to your PyInstaller fork and select that commit.' >&2
+            exit 1
+          fi
+          {
+            echo "pykotor_repository=$PYKOTOR_REPOSITORY"
+            echo "pyinstaller_repository=$PYINSTALLER_REPOSITORY"
+            echo "pykotor_sha=$(git -C PyKotor rev-parse HEAD)"
+            echo "pyinstaller_sha=$(git -C _pyinstaller rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+
+  package:
+    name: ${{ matrix.target }}
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            runner: windows-2022
+            deployment_target: ''
+          - target: linux-x86_64
+            runner: ubuntu-22.04
+            deployment_target: ''
+          - target: macos-x86_64
+            runner: macos-15-intel
+            deployment_target: '15.0'
+          - target: macos-arm64
+            runner: macos-15
+            deployment_target: '15.0'
+    defaults:
+      run:
+        shell: bash
+    env:
+      HOLOPATCHER_PYKOTOR_ROOT: ${{ github.workspace }}/PyKotor
+      PYINSTALLER_CONFIG_DIR: ${{ runner.temp }}/pyinstaller-config
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
+      PYTHONUTF8: '1'
+      FRONTEND_BUILD_MODE: onefile
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+    steps:
+      - name: Check out this HoloPatcher revision
+        uses: actions/checkout@v7
+        with:
+          path: HoloPatcher
+          persist-credentials: false
+      - name: Check out the resolved audited backend
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.resolve.outputs.pykotor_repository }}
+          ref: ${{ needs.resolve.outputs.pykotor_sha }}
+          path: PyKotor
+          token: ${{ secrets.SOURCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - name: Check out the resolved PyInstaller fork
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ needs.resolve.outputs.pyinstaller_repository }}
+          ref: ${{ needs.resolve.outputs.pyinstaller_sha }}
+          path: _pyinstaller
+          token: ${{ secrets.SOURCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+
+      - name: Linux native compiler, Tcl/Tk, and GUI-test dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential zlib1g-dev tk-dev patchelf \
+            xvfb xauth desktop-file-utils fonts-dejavu-core
+      - name: Set up Python for Windows or Linux
+        if: runner.os != 'macOS'
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Set up native macOS Python with matching Tcl/Tk
+        if: runner.os == 'macOS'
+        run: |
+          brew install python@3.12 python-tk@3.12
+          echo "$(brew --prefix python@3.12)/libexec/bin" >> "$GITHUB_PATH"
+      - name: Create a clean build environment
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import venv
+          root = Path(os.environ['RUNNER_TEMP']) / 'holopatcher-build-venv'
+          venv.EnvBuilder(with_pip=True, clear=True).create(root)
+          bin_dir = root / ('Scripts' if os.name == 'nt' else 'bin')
+          with open(os.environ['GITHUB_PATH'], 'a', encoding='utf-8') as stream:
+              stream.write(str(bin_dir) + '\n')
+      - name: Install application and test dependencies, not upstream PyInstaller
+        working-directory: HoloPatcher
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-ci.txt
+          python -c 'import tkinter; print("Tcl:", tkinter.Tcl().eval("info patchlevel"))'
+          python run.py --backend-info
+      - name: Check onefile/no-UPX policy and backend packaging hook
+        working-directory: HoloPatcher
+        run: |
+          python -m unittest discover -s tests -p 'test_build_policy.py' -v
+          python -m unittest discover -s ../PyKotor/tests -p 'test_pyinstaller_hooks.py' -v
+      # The supplied backend has pre-existing regression-test failures. Report
+      # them without confusing those with a failed packaging smoke test.
+      - name: Run backend regression diagnostics (non-gating baseline)
+        id: backend_tests
+        continue-on-error: true
+        working-directory: PyKotor
+        run: python -m pytest tests/tslpatcher -q --junitxml="$RUNNER_TEMP/backend-tests.xml"
+      - name: Surface backend regression failures
+        if: steps.backend_tests.outcome == 'failure'
+        run: |
+          echo '::warning::Backend regression tests failed; inspect backend-tests artifact. Packaging smoke tests remain mandatory.'
+          echo '### Backend regression warning' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Regression diagnostics failed. This build is not evidence that the backend regression suite passes.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep the backend regression report
+        if: success() || failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-tests-${{ matrix.target }}
+          path: ${{ runner.temp }}/backend-tests.xml
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # Shared action is stored IN YOUR FORK, not copied into every app repo.
+      # It removes shipped bootloaders and Waf objects and compiles on this OS.
+      - name: Compile and install a fresh PyInstaller from our fork
+        id: fresh
+        uses: ./_pyinstaller/.github/actions/fresh-pyinstaller
+        with:
+          source-path: _pyinstaller
+          output-path: build-tools
+      - name: Build and test onefile Linux AppImage (UPX disabled)
+        if: runner.os == 'Linux'
+        working-directory: HoloPatcher
+        run: xvfb-run -a python packaging/build_distributions.py --target linux-x86_64
+      - name: Build and test onefile Windows/macOS distributions (UPX disabled)
+        if: runner.os != 'Linux'
+        working-directory: HoloPatcher
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: python packaging/build_distributions.py --target "$BUILD_TARGET"
+      - name: Upload verified application distributions
+        uses: actions/upload-artifact@v7
+        with:
+          name: HoloPatcher-${{ matrix.target }}
+          path: HoloPatcher/release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+      - name: Upload this job's reusable PyInstaller wheel and proof of compilation
+        if: success() || failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fresh-pyinstaller-${{ matrix.target }}
+          path: build-tools/*
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Upload packaging diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: packaging-diagnostics-${{ matrix.target }}
+          path: |
+            HoloPatcher/.pyinstaller-build/**/warn-*.txt
+            HoloPatcher/.pyinstaller-build/**/xref-*.html
+            _pyinstaller/bootloader/build/config.log
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
