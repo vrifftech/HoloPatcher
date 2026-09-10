@@ -99,7 +99,7 @@ jobs:
         shell: bash
     env:
       HOLOPATCHER_PYKOTOR_ROOT: ${{ github.workspace }}/PyKotor
-      PYINSTALLER_CONFIG_DIR: ${{ runner.temp }}/pyinstaller-config
+      PYINSTALLER_CONFIG_DIR: ${{ github.workspace }}/.pyinstaller-config
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
       PYTHONUTF8: '1'
       FRONTEND_BUILD_MODE: onefile
