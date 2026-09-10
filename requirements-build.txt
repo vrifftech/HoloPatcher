@@ -1,0 +1,4 @@
+-r requirements.txt
+PyInstaller>=6,<7
+setuptools>=68
+wheel

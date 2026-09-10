@@ -1,0 +1,9 @@
+include run.py build_windows.ps1
+include requirements*.txt
+include CONSOLIDATED_SOURCE.md PORT_NOTES.md CLEANUP_NOTES.md
+include SOURCE_*.json
+recursive-include packaging *.py *.spec
+prune tests
+prune dist
+prune .venv
+global-exclude __pycache__ *.py[cod] .DS_Store Thumbs.db

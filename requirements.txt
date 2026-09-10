@@ -1,2 +1,4 @@
-pycryptodome
-requests
+# Third-party runtime requirements for the explicitly selected local backend.
+ply>=3.11,<4
+charset-normalizer>=2,<4
+defusedxml>=0.7,<1
