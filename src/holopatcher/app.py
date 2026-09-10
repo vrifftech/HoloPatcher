@@ -239,10 +239,6 @@ class App(tk.Tk):
         self.namespaces_combobox.set("Select the mod to install")
         ToolTip(self.namespaces_combobox, lambda: self.get_namespace_description())
         self.namespaces_combobox.bind("<<ComboboxSelected>>", self.on_namespace_option_chosen)
-        # Handle annoyances with Focus Events
-        self.namespaces_combobox.bind("<FocusIn>", self.on_combobox_focus_in)
-        self.namespaces_combobox.bind("<FocusOut>", self.on_combobox_focus_out)
-        self.namespaces_combobox_state: int = 0
         self.namespace_info_button = ttk.Button(
             top_frame, text="?", width=3, takefocus=True,
             command=self.show_namespace_description,
@@ -250,9 +246,9 @@ class App(tk.Tk):
         self.namespace_info_button.grid(row=0, column=1, padx=(0, 5), pady=2)
         self.namespace_info_button.bind("<Return>", lambda event: self.namespace_info_button.invoke())
         ToolTip(
-    self.namespace_info_button,
-    lambda: "Show the selected installation option's description",
-)
+            self.namespace_info_button,
+            lambda: "Show the selected installation option's description",
+        )
         # Browse for a tslpatcher mod
         self.browse_button: ttk.Button = ttk.Button(top_frame, text="Browse", command=self.open_mod)
         self.browse_button.grid(row=0, column=2, padx=5, pady=2, sticky="e")
@@ -311,23 +307,6 @@ class App(tk.Tk):
         font_obj = tkfont.Font(font=self.main_text.cget("font"))
         font_obj.configure(size=9)
         text_frame.configure(font=font_obj)
-
-    def on_combobox_focus_in(
-        self,
-        event: tk.Event,
-    ):
-        if self.namespaces_combobox_state == 2: # no selection, fix the focus  # noqa: PLR2004
-            self.focus_set()
-            self.namespaces_combobox_state = 0  # base status
-        else:
-            self.namespaces_combobox_state = 1  # combobox clicked
-
-    def on_combobox_focus_out(
-        self,
-        event: tk.Event,
-    ):
-        if self.namespaces_combobox_state == 1:
-            self.namespaces_combobox_state = 2  # no selection
 
     @on_ui_thread
     def check_for_updates(self):
@@ -501,7 +480,7 @@ class App(tk.Tk):
         except Exception as e:  # noqa: BLE001
             self._handle_general_exception(e, "An unexpected error occurred while loading the patcher namespace.")
         else:
-            self.after(10, lambda: self.move_cursor_to_end(self.namespaces_combobox))
+            self.focus_set()
 
     @on_ui_thread
     def _handle_general_exception(self, exc: BaseException, custom_msg: str = "Unexpected error", title: str = "", msgbox: bool = True):
@@ -534,6 +513,7 @@ class App(tk.Tk):
         selected_index = 0 if selected_namespace is None else next(i for i, value in enumerate(namespaces) if value is selected_namespace)
         self.namespaces = namespaces
         self.namespaces_combobox["values"] = [namespace.name or f"Option {i + 1}" for i, namespace in enumerate(namespaces)]
+        self.namespaces_combobox.config(state="readonly")
         self.namespaces_combobox.current(selected_index)
         self.install_button.config(state=tk.NORMAL)
         self.namespace_info_button.config(state=tk.NORMAL)
@@ -586,7 +566,7 @@ class App(tk.Tk):
             self.gamepaths.set(str(directory))
             if directory_str not in self.gamepaths["values"]:
                 self.gamepaths["values"] = (*self.gamepaths["values"], directory_str)
-            self.after(10, self.move_cursor_to_end, self.namespaces_combobox)
+            self.after(10, self.move_cursor_to_end, self.gamepaths)
         except Exception as e:  # noqa: BLE001
             self._handle_general_exception(e, "An unexpected error occurred while loading the game directory.")
 
