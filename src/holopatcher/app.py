@@ -249,7 +249,10 @@ class App(tk.Tk):
         )
         self.namespace_info_button.grid(row=0, column=1, padx=(0, 5), pady=2)
         self.namespace_info_button.bind("<Return>", lambda event: self.namespace_info_button.invoke())
-        ToolTip(self.namespace_info_button, "Show the selected installation option's description")
+        ToolTip(
+    self.namespace_info_button,
+    lambda: "Show the selected installation option's description",
+)
         # Browse for a tslpatcher mod
         self.browse_button: ttk.Button = ttk.Button(top_frame, text="Browse", command=self.open_mod)
         self.browse_button.grid(row=0, column=2, padx=5, pady=2, sticky="e")
