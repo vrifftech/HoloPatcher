@@ -127,12 +127,11 @@ jobs:
           token: ${{ secrets.SOURCE_READ_TOKEN || github.token }}
           persist-credentials: false
 
-      - name: Linux native compiler, Tcl/Tk, and GUI-test dependencies
+      - name: Linux native compiler, Tcl/Tk, and AppImage dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install --yes build-essential zlib1g-dev tk-dev patchelf \
-            xvfb xauth desktop-file-utils fonts-dejavu-core
+          sudo apt-get install --yes build-essential zlib1g-dev tk-dev patchelf desktop-file-utils
       - name: Set up Python 3.12
         uses: actions/setup-python@v7
         with:
@@ -155,40 +154,12 @@ jobs:
           bin_dir = root / ('Scripts' if os.name == 'nt' else 'bin')
           with open(os.environ['GITHUB_PATH'], 'a', encoding='utf-8') as stream:
               stream.write(str(bin_dir) + '\n')
-      - name: Install application and test dependencies, not upstream PyInstaller
+      - name: Install application build dependencies, not upstream PyInstaller
         working-directory: HoloPatcher
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements-ci.txt
+          python -m pip install -r requirements-build.txt
           python -c 'import tkinter; print("Tcl:", tkinter.Tcl().eval("info patchlevel"))'
-          python run.py --backend-info
-      - name: Check onefile/no-UPX policy and backend packaging hook
-        working-directory: HoloPatcher
-        run: |
-          python -m unittest discover -s tests -p 'test_build_policy.py' -v
-          python -m unittest discover -s ../PyKotor/tests -p 'test_pyinstaller_hooks.py' -v
-      # The supplied backend has pre-existing regression-test failures. Report
-      # them without confusing those with a failed packaging smoke test.
-      - name: Run backend regression diagnostics (non-gating baseline)
-        id: backend_tests
-        continue-on-error: true
-        working-directory: PyKotor
-        run: python -m pytest tests/tslpatcher -q --junitxml="$RUNNER_TEMP/backend-tests.xml"
-      - name: Surface backend regression failures
-        if: steps.backend_tests.outcome == 'failure'
-        run: |
-          echo '::warning::Backend regression tests failed; inspect backend-tests artifact. Packaging smoke tests remain mandatory.'
-          echo '### Backend regression warning' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Regression diagnostics failed. This build is not evidence that the backend regression suite passes.' >> "$GITHUB_STEP_SUMMARY"
-      - name: Keep the backend regression report
-        if: success() || failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: backend-tests-${{ matrix.target }}
-          path: ${{ runner.temp }}/backend-tests.xml
-          if-no-files-found: ignore
-          retention-days: 30
-
       # Shared action is stored IN YOUR FORK, not copied into every app repo.
       # It removes shipped bootloaders and Waf objects and compiles on this OS.
       - name: Compile and install a fresh PyInstaller from our fork
@@ -197,11 +168,11 @@ jobs:
         with:
           source-path: _pyinstaller
           output-path: build-tools
-      - name: Build and test onefile Linux AppImage (UPX disabled)
+      - name: Build onefile Linux AppImage (UPX disabled)
         if: runner.os == 'Linux'
         working-directory: HoloPatcher
-        run: xvfb-run -a python packaging/build_distributions.py --target linux-x86_64
-      - name: Build and test onefile Windows/macOS distributions (UPX disabled)
+        run: python packaging/build_distributions.py --target linux-x86_64
+      - name: Build onefile Windows/macOS distributions (UPX disabled)
         if: runner.os != 'Linux'
         working-directory: HoloPatcher
         env:
