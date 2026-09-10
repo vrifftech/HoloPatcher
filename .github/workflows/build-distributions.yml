@@ -133,17 +133,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes build-essential zlib1g-dev tk-dev patchelf \
             xvfb xauth desktop-file-utils fonts-dejavu-core
-      - name: Set up Python for Windows or Linux
-        if: runner.os != 'macOS'
+      - name: Set up Python 3.12
         uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-          architecture: x64
-      - name: Set up native macOS Python with matching Tcl/Tk
-        if: runner.os == 'macOS'
+      - name: Verify Python architecture and Tcl/Tk
+        shell: python
         run: |
-          brew install python@3.12 python-tk@3.12
-          echo "$(brew --prefix python@3.12)/libexec/bin" >> "$GITHUB_PATH"
+          import platform
+          import tkinter
+          print("Python architecture:", platform.machine())
+          print("Tcl/Tk:", tkinter.Tcl().eval("info patchlevel"))
       - name: Create a clean build environment
         shell: python
         run: |
