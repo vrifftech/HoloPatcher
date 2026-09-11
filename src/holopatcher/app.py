@@ -4,6 +4,7 @@ import ctypes
 import json
 import os
 import pathlib
+import re
 import stat
 import sys
 import tkinter as tk
@@ -19,6 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 from typing import TYPE_CHECKING, Callable
 from types import SimpleNamespace
+from urllib.parse import urlparse
 
 from holopatcher import CURRENT_VERSION, ExitCode
 from holopatcher.bootstrap import bootstrap_backend
@@ -46,6 +48,114 @@ if TYPE_CHECKING:
     from pykotor.tslpatcher.namespaces import PatcherNamespace
 
 VERSION_LABEL = f"v{CURRENT_VERSION}"
+
+_RTF_FIELD_START = re.compile(r"\{\\field\b", re.IGNORECASE)
+_RTF_FLDINST_START = re.compile(r"\{(?:\\\*)?\\fldinst\b", re.IGNORECASE)
+_RTF_FLDRSLT_START = re.compile(r"\{\\fldrslt\b", re.IGNORECASE)
+_RTF_HYPERLINK = re.compile(r'\bHYPERLINK\s+(?:"([^"]+)"|([^\s{}]+))', re.IGNORECASE)
+
+
+def _rtf_group_end(source: str, start: int) -> int | None:
+    """Return the exclusive end of an RTF group starting at *start*."""
+    if start >= len(source) or source[start] != "{":
+        return None
+    depth = 0
+    index = start
+    while index < len(source):
+        char = source[index]
+        if char == "\\" and index + 1 < len(source) and source[index + 1] in "{}\\":
+            index += 2
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return None
+
+
+def _rtf_destination_text(group: str, control_word: str) -> str:
+    """Strip one destination control word, then decode the remaining RTF."""
+    inner = group[1:-1]
+    inner = re.sub(
+        rf"^\\(?:\*\\)?{re.escape(control_word)}\b\s*",
+        "",
+        inner,
+        count=1,
+        flags=re.IGNORECASE,
+    )
+    return striprtf("{" + inner + "}").strip()
+
+
+def _rtf_hyperlink(field_group: str) -> tuple[str, str] | None:
+    instruction_match = _RTF_FLDINST_START.search(field_group)
+    result_match = _RTF_FLDRSLT_START.search(field_group)
+    if instruction_match is None or result_match is None:
+        return None
+
+    instruction_end = _rtf_group_end(field_group, instruction_match.start())
+    result_end = _rtf_group_end(field_group, result_match.start())
+    if instruction_end is None or result_end is None:
+        return None
+
+    instruction = _rtf_destination_text(
+        field_group[instruction_match.start():instruction_end],
+        "fldinst",
+    )
+    url_match = _RTF_HYPERLINK.search(instruction)
+    if url_match is None:
+        return None
+
+    url = (url_match.group(1) or url_match.group(2) or "").strip()
+    if not url:
+        return None
+
+    display = _rtf_destination_text(
+        field_group[result_match.start():result_end],
+        "fldrslt",
+    ) or url
+    return display, url
+
+
+def _strip_rtf_with_hyperlinks(rtf_text: str) -> tuple[str, list[tuple[int, int, str]]]:
+    """Convert RTF to plain text while retaining standard HYPERLINK spans."""
+    transformed: list[str] = []
+    replacements: list[tuple[str, str, str]] = []
+    cursor = 0
+    search_from = 0
+
+    while True:
+        match = _RTF_FIELD_START.search(rtf_text, search_from)
+        if match is None:
+            break
+        field_end = _rtf_group_end(rtf_text, match.start())
+        if field_end is None:
+            break
+
+        parsed = _rtf_hyperlink(rtf_text[match.start():field_end])
+        if parsed is not None:
+            display, url = parsed
+            marker = f"HOLOPATCHERLINKMARKER{len(replacements):06d}X"
+            transformed.append(rtf_text[cursor:match.start()])
+            transformed.append(marker)
+            replacements.append((marker, display, url))
+            cursor = field_end
+        search_from = field_end
+
+    transformed.append(rtf_text[cursor:])
+    plain_text = striprtf("".join(transformed))
+    spans: list[tuple[int, int, str]] = []
+
+    for marker, display, url in replacements:
+        start = plain_text.find(marker)
+        if start < 0:
+            continue
+        plain_text = plain_text[:start] + display + plain_text[start + len(marker):]
+        spans.append((start, start + len(display), url))
+
+    return plain_text, spans
 
 # Minimum display level per severity, matching TSLPatcher's AddLogLine().
 _LOG_DISPLAY_LEVELS = {
@@ -92,6 +202,7 @@ class App(tk.Tk):
         self.mod_path: str = ""
         self.namespaces: list[PatcherNamespace] = []
         self.tslpatchdata_path: CaseAwarePath | None = None
+        self._tooltips: list[ToolTip] = []
 
         self.initialize_logger()
         self.initialize_top_menu()
@@ -205,18 +316,11 @@ class App(tk.Tk):
         neocities_menu.add_command(label="Website", command=lambda: webbrowser.open_new("https://kotor.neocities.org"))
         help_menu.add_cascade(label="KOTOR Community Portal", menu=neocities_menu)
 
-        # PCGamingWiki submenu
-        pcgamingwiki_menu = tk.Menu(help_menu, tearoff=0)
-        pcgamingwiki_menu.add_command(label="KOTOR 1", command=lambda: webbrowser.open_new("https://www.pcgamingwiki.com/wiki/Star_Wars:_Knights_of_the_Old_Republic"))
-        pcgamingwiki_menu.add_command(label="KOTOR 2: TSL", command=lambda: webbrowser.open_new("https://www.pcgamingwiki.com/wiki/Star_Wars:_Knights_of_the_Old_Republic_II_-_The_Sith_Lords"))
-        help_menu.add_cascade(label="PCGamingWiki", menu=pcgamingwiki_menu)
-
-        # About menu
-        about_menu = tk.Menu(self.menu_bar, tearoff=0)
-        about_menu.add_command(label="Updates (not configured)", command=self.check_for_updates)
-        about_menu.add_command(label="Original HoloPatcher project", command=lambda: webbrowser.open_new("https://deadlystream.com/files/file/2243-holopatcher"))
-        about_menu.add_command(label="Original donor source", command=lambda: webbrowser.open_new("https://github.com/NickHugi/PyKotor"))
-        self.menu_bar.add_cascade(label="About", menu=about_menu)
+        # OpenKOTOR submenu
+        openkotor_menu = tk.Menu(help_menu, tearoff=0)
+        openkotor_menu.add_command(label="Discord", command=lambda: webbrowser.open_new("https://discord.gg/YC7wBqabxA"))
+        openkotor_menu.add_command(label="Website", command=lambda: webbrowser.open_new("https://openkotor.com"))
+        help_menu.add_cascade(label="OpenKOTOR", menu=openkotor_menu)
 
     def initialize_ui_controls(self):
         # Use grid layout for main window
@@ -237,7 +341,7 @@ class App(tk.Tk):
         self.namespaces_combobox: ttk.Combobox = ttk.Combobox(top_frame, state="readonly", style="TCombobox")
         self.namespaces_combobox.grid(row=0, column=0, padx=5, pady=2, sticky="ew")
         self.namespaces_combobox.set("Select the mod to install")
-        ToolTip(self.namespaces_combobox, lambda: self.get_namespace_description())
+        self._tooltips.append(ToolTip(self.namespaces_combobox, lambda: self.get_namespace_description()))
         self.namespaces_combobox.bind("<<ComboboxSelected>>", self.on_namespace_option_chosen)
         self.namespace_info_button = ttk.Button(
             top_frame, text="?", width=3, takefocus=True,
@@ -245,10 +349,10 @@ class App(tk.Tk):
         )
         self.namespace_info_button.grid(row=0, column=1, padx=(0, 5), pady=2)
         self.namespace_info_button.bind("<Return>", lambda event: self.namespace_info_button.invoke())
-        ToolTip(
+        self._tooltips.append(ToolTip(
             self.namespace_info_button,
             lambda: "Show the selected installation option's description",
-        )
+        ))
         # Browse for a tslpatcher mod
         self.browse_button: ttk.Button = ttk.Button(top_frame, text="Browse", command=self.open_mod)
         self.browse_button.grid(row=0, column=2, padx=5, pady=2, sticky="e")
@@ -403,6 +507,11 @@ class App(tk.Tk):
         combobox.xview(position)
         self.focus_set()
 
+    def _hide_tooltips(self):
+        """Close any tooltip windows before modal actions or mod state changes."""
+        for tooltip in self._tooltips:
+            tooltip.hide_tip()
+
     def get_namespace_description(self) -> str:
         index = self.namespaces_combobox.current()
         return self.namespaces[index].description if 0 <= index < len(self.namespaces) else ""
@@ -410,6 +519,7 @@ class App(tk.Tk):
 
     @on_ui_thread
     def show_namespace_description(self):
+        self._hide_tooltips()
         if self.task_running or self._close_requested:
             return
         index = self.namespaces_combobox.current()
@@ -442,6 +552,7 @@ class App(tk.Tk):
             4. Handling game paths if a game number is found
             5. Loading the info.rtf file as defined.
         """
+        self._hide_tooltips()
         if self.task_running or self._close_requested:
             return
         try:
@@ -506,6 +617,7 @@ class App(tk.Tk):
 
     @on_ui_thread
     def load_namespace(self, namespaces: list[PatcherNamespace], config_reader: ConfigReader | None = None, *, selected_namespace: PatcherNamespace | None = None):
+        self._hide_tooltips()
         if self.task_running:
             return
         if not namespaces:
@@ -523,6 +635,7 @@ class App(tk.Tk):
     def open_mod(self, default_directory_path_str: os.PathLike | str | None = None, *,
                  namespace_index: int | None = None, namespace_id: str | None = None):
         """Commit a package and its namespace catalogue together after validation."""
+        self._hide_tooltips()
         if self.task_running or self._close_requested:
             return
         try:
@@ -718,6 +831,8 @@ class App(tk.Tk):
 
     @on_ui_thread
     def set_state(self, state: bool):
+        if state:
+            self._hide_tooltips()
         self.task_running = state
         idle = not state and not self._close_requested
         state_name = tk.NORMAL if idle else tk.DISABLED
@@ -727,7 +842,7 @@ class App(tk.Tk):
         self.gamepaths.config(state=state_name)
         self.namespaces_combobox.config(state="readonly" if idle and self.namespaces else tk.DISABLED)
         self.namespace_info_button.config(state=tk.NORMAL if idle and self.namespaces else tk.DISABLED)
-        for label in ("Tools", "About"):
+        for label in ("Tools",):
             self.menu_bar.entryconfigure(label, state=state_name)
 
     def _clear_text_content(self):
@@ -856,16 +971,37 @@ class App(tk.Tk):
         self.main_text.config(state=tk.DISABLED)
 
 
+    def _open_info_link(self, url: str):
+        """Open a user-clicked web/mail link from mod-authored info.rtf."""
+        scheme = urlparse(url).scheme.lower()
+        if scheme not in {"http", "https", "mailto"}:
+            self._dialog(
+                "showwarning",
+                "Unsupported link",
+                f"HoloPatcher will not open this link type:\n{url}",
+            )
+            return
+        webbrowser.open_new_tab(url)
+
     @on_ui_thread
     def set_stripped_rtf_text(
         self,
         rtf_text: str,
     ):
-        """Strips the info.rtf of all RTF related text and displays it in the UI."""
-        stripped_content: str = striprtf(rtf_text)
+        """Display info.rtf as plain text while preserving clickable hyperlinks."""
+        stripped_content, links = _strip_rtf_with_hyperlinks(rtf_text)
         self._clear_text_content()
         self._log_view_active = False
-        self.main_text.insert(tk.END, stripped_content)
+        self.main_text.insert("1.0", stripped_content)
+
+        for link_index, (start, end, url) in enumerate(links):
+            tag = f"_rtf_hyperlink_{link_index}"
+            self.main_text.tag_configure(tag, foreground="#0563C1", underline=True)
+            self.main_text.tag_add(tag, f"1.0+{start}c", f"1.0+{end}c")
+            self.main_text.tag_bind(tag, "<Enter>", lambda event: self.main_text.config(cursor="hand2"))
+            self.main_text.tag_bind(tag, "<Leave>", lambda event: self.main_text.config(cursor=""))
+            self.main_text.tag_bind(tag, "<Button-1>", lambda event, target=url: self._open_info_link(target))
+
         self.main_text.config(state=tk.DISABLED)
 
     def write_log(self, log: PatchLog):
