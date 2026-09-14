@@ -370,12 +370,22 @@ class App(tk.Tk):
         # Middle area for text and scrollbar
         text_frame = tk.Frame(self)
         text_frame.grid(row=1, column=0, sticky="nsew")
-        text_frame.grid_rowconfigure(0, weight=1)
+        text_frame.grid_rowconfigure(1, weight=1)
         text_frame.grid_columnconfigure(0, weight=1)
+
+        self.preparation_label = ttk.Label(
+            text_frame,
+            text=("Preparing installation...\n"
+                  "Reading configuration and assembling patch order.\n"
+                  "Large mods may take a while."),
+            padding=8, justify=tk.LEFT, anchor="w", wraplength=350,
+        )
+        self.preparation_label.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self.preparation_label.grid_remove()
 
         # Configure the text
         self.main_text = tk.Text(text_frame, wrap=tk.WORD, width=44, height=16)
-        self.main_text.grid(row=0, column=0, sticky="nsew")
+        self.main_text.grid(row=1, column=0, sticky="nsew")
         self.set_text_font(self.main_text)
         self._log_bold_font = tkfont.Font(self, font=self.main_text.cget("font"))
         self._log_bold_font.configure(weight="bold")
@@ -384,7 +394,7 @@ class App(tk.Tk):
 
         # Create scrollbar for main frame
         scrollbar = tk.Scrollbar(text_frame, command=self.main_text.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        scrollbar.grid(row=1, column=1, sticky="ns")
         self.main_text.config(yscrollcommand=scrollbar.set)
 
         # Bottom area for buttons
@@ -782,7 +792,7 @@ class App(tk.Tk):
             self._handle_general_exception(exc, "Could not select the installation option")
             return
         self._start_task("Installation", lambda: self.begin_install_thread(self.simple_thread_event, selection),
-                         log_path=pathlib.Path(selection[0]) / "installlog.txt", log_level=self.log_level)
+                         log_path=pathlib.Path(selection[0]) / "installlog.txt", log_level=self.log_level, preparing_install=True)
 
     def begin_install_thread(self, should_cancel_thread: Event, selection=None):
         """Use the admitted GUI selection and the existing worker lifecycle."""
@@ -797,7 +807,7 @@ class App(tk.Tk):
                 self._handle_general_exception(exc, "Could not select the installation option")
                 return
             self._start_task("Installation", lambda: self.begin_install_thread(should_cancel_thread, selected),
-                             log_path=pathlib.Path(selected[0]) / "installlog.txt", log_level=self.log_level)
+                             log_path=pathlib.Path(selected[0]) / "installlog.txt", log_level=self.log_level, preparing_install=True)
             return
         package_root, game_path, ini_file_path = selection
         installer = self._create_installer(package_root, game_path, ini_file_path)
@@ -1047,7 +1057,8 @@ class App(tk.Tk):
     _resolve_package_file = staticmethod(resolve_package_file)
 
     @on_ui_thread
-    def _start_task(self, name, work: Callable[[], None], *, log_path=None, log_level: LogLevel = LogLevel.FULL):
+    def _start_task(self, name, work: Callable[[], None], *, log_path=None,
+                    log_level: LogLevel = LogLevel.FULL, preparing_install: bool = False):
         """Admit one operation, with selections captured by the caller on the UI thread."""
         if self.task_running or self._close_requested:
             self._dialog("showinfo", "Task already running", "Finish the current task before starting another.")
@@ -1074,9 +1085,12 @@ class App(tk.Tk):
         elif self._log_view_active:
             # A previous diagnostic task may have replaced the selected option's information.
             self.on_namespace_option_chosen(tk.Event())
-        self.progress.configure(mode="indeterminate", value=0, maximum=1)
+        # Keep a full animation cycle; maximum=1 skips between the endpoints.
+        self.progress.configure(mode="indeterminate", value=0, maximum=100)
         self.progress.start(50)
-        self.progress_label.configure(text=name)
+        self.progress_label.configure(text="Preparing installation..." if preparing_install else name)
+        if preparing_install:
+            self.preparation_label.grid()
         self.set_state(True)
 
         def run():
@@ -1106,7 +1120,10 @@ class App(tk.Tk):
                 stream, self._log_file = self._log_file, None
                 stream.close()
             self.set_state(False)
+            self.preparation_label.grid_remove()
             self.progress.stop()
+            self.progress.configure(mode="determinate", maximum=1, value=0)
+            self.progress_label.configure(text="Could not start; review the log")
             self._display_log_level = LogLevel.FULL
             self.exit_code = ExitCode.EXCEPTION_DURING_INSTALL
             self._handle_general_exception(exc, "Could not start the operation")
@@ -1118,6 +1135,7 @@ class App(tk.Tk):
         if self.task_thread is not None and self.task_thread.is_alive():
             self.after(10, self._finish_task)
             return
+        self.preparation_label.grid_remove()
         final_progress = float(self.progress.cget("value"))
         indeterminate = str(self.progress.cget("mode")) == "indeterminate"
         self.progress.stop()
@@ -1138,6 +1156,7 @@ class App(tk.Tk):
             self._close_when_idle()
 
     def _show_progress(self, completed, total):
+        self.preparation_label.grid_remove()
         self.progress.stop()
         self.progress.configure(mode="determinate", maximum=max(total, 1), value=completed)
         self.progress_label.configure(text=f"{completed} / {total} operations processed")
