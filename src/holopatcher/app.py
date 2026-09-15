@@ -203,6 +203,11 @@ class App(tk.Tk):
         self.namespaces: list[PatcherNamespace] = []
         self.tslpatchdata_path: CaseAwarePath | None = None
         self._tooltips: list[ToolTip] = []
+        self._discovered_game_paths: dict[Game, list[str]] = {Game.K1: [], Game.K2: []}
+        self._manual_game_paths: list[str] = []
+        self._game_path_filter: tuple[Game, ...] = (Game.K1, Game.K2)
+        self._discovery_running = False
+        self._discovery_thread: Thread | None = None
 
         self.initialize_logger()
         self.initialize_top_menu()
@@ -225,6 +230,7 @@ class App(tk.Tk):
                       namespace_index=cmdline_args.namespace_option_index,
                       namespace_id=cmdline_args.namespace_id)
         self.handle_commandline(cmdline_args)
+        self.after_idle(self._start_game_discovery)
 
 
     def _drain_ui_queue(self):
@@ -361,11 +367,18 @@ class App(tk.Tk):
         self.gamepaths = ttk.Combobox(top_frame, style="TCombobox")
         self.gamepaths.set("Select your KOTOR directory path")
         self.gamepaths.grid(row=1, column=0, columnspan=2, padx=5, pady=2, sticky="ew")
-        self.gamepaths["values"] = [str(path) for game in find_kotor_paths_from_default().values() for path in game]
+        self.gamepaths["values"] = ()
         self.gamepaths.bind("<<ComboboxSelected>>", self.on_gamepaths_chosen)
+        self.gamepaths.bind("<Return>", self._remember_game_path)
+        self.gamepaths.bind("<FocusOut>", self._remember_game_path)
         # Browse for a KOTOR path
         self.gamepaths_browse_button = ttk.Button(top_frame, text="Browse", command=self.open_kotor)
         self.gamepaths_browse_button.grid(row=1, column=2, padx=5, pady=2, sticky="e")
+
+        self.discovery_status = ttk.Label(top_frame, text="Searching for game installations…", wraplength=290)
+        self.discovery_status.grid(row=2, column=0, columnspan=2, padx=5, pady=(0, 4), sticky="w")
+        self.discovery_refresh_button = ttk.Button(top_frame, text="Refresh", command=self._start_game_discovery)
+        self.discovery_refresh_button.grid(row=2, column=2, padx=5, pady=(0, 4), sticky="e")
 
         # Middle area for text and scrollbar
         text_frame = tk.Frame(self)
@@ -499,11 +512,67 @@ class App(tk.Tk):
         self._close_requested = True
         self._close_when_idle()
 
+    def _start_game_discovery(self):
+        """One independent, read-only scan; never occupy the installation worker."""
+        if self._discovery_running or self.task_running or self._close_requested or self._closing:
+            return
+        self._discovery_running = True
+        self.discovery_status.config(text="Searching for game installations…")
+        self.discovery_refresh_button.config(state=tk.DISABLED)
+
+        def discover():
+            try:
+                paths = {game: [str(path) for path in values]
+                         for game, values in find_kotor_paths_from_default().items()}
+            except Exception as exc:
+                if sys.stderr is not None:
+                    traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
+                self._post_ui(App._finish_game_discovery, None)
+            else:
+                self._post_ui(App._finish_game_discovery, paths)
+
+        try:
+            self._discovery_thread = Thread(target=discover, name="game-installation-discovery", daemon=True)
+            self._discovery_thread.start()
+        except Exception:
+            self._finish_game_discovery(None)
+
+    def _finish_game_discovery(self, paths: dict[Game, list[str]] | None):
+        self._discovery_running = False
+        self._discovery_thread = None
+        # A slow/unavailable volume must not prevent closing the window. Late
+        # results stay on the queue; no Tk calls originate from the worker.
+        if self._closing or self._close_requested:
+            return
+        if paths is None:
+            self.discovery_status.config(text="Search failed. Use Browse or Refresh.")
+        else:
+            self._discovered_game_paths = paths
+            count = sum(len(values) for values in paths.values())
+            self.discovery_status.config(text=(
+                f"Found {count} game installation{'s' if count != 1 else ''}."
+                if count else "No installations found. Use Browse."
+            ))
+            self._refresh_game_path_choices()
+        self.discovery_refresh_button.config(state=tk.DISABLED if self.task_running else tk.NORMAL)
+
+    def _remember_game_path(self, event: tk.Event | None = None):
+        value = self.gamepaths.get()
+        if value and value != "Select your KOTOR directory path" and value not in self._manual_game_paths:
+            self._manual_game_paths.append(value)
+
+    def _refresh_game_path_choices(self):
+        """Filter the cached scan without changing the user's selection or text."""
+        self._remember_game_path()
+        paths = [path for game in self._game_path_filter for path in self._discovered_game_paths.get(game, ())]
+        self.gamepaths["values"] = tuple(dict.fromkeys([*paths, *self._manual_game_paths]))
+
     def on_gamepaths_chosen(
         self,
         event: tk.Event,
     ):
         """Adjust the combobox after a short delay."""
+        self._remember_game_path()
         self.after(10, lambda: self.move_cursor_to_end(event.widget))
 
     def move_cursor_to_end(
@@ -577,11 +646,11 @@ class App(tk.Tk):
             game_number: int | None = reader.config.game_number
             if game_number:
                 game = Game(game_number)
-                self.gamepaths["values"] = [
-                    str(path)
-                    for game_key in ([game] + ([Game.K1] if game == Game.K2 else []))
-                    for path in find_kotor_paths_from_default()[game_key]
-                ]
+                # Retain the existing K2-option ordering/compatibility policy.
+                self._game_path_filter = (game, Game.K1) if game == Game.K2 else (game,)
+            else:
+                self._game_path_filter = (Game.K1, Game.K2)
+            self._refresh_game_path_choices()
 
             # Strip info.rtf and display in the main window frame.
             info_rtf_path = self._package_file(namespace_option.rtf_filepath())
@@ -685,10 +754,8 @@ class App(tk.Tk):
             directory = CaseAwarePath.get_case_sensitive_path(os.path.expanduser(directory_path_str))
             if not self.check_access(directory):
                 return
-            directory_str = str(directory)
             self.gamepaths.set(str(directory))
-            if directory_str not in self.gamepaths["values"]:
-                self.gamepaths["values"] = (*self.gamepaths["values"], directory_str)
+            self._refresh_game_path_choices()
             self.after(10, self.move_cursor_to_end, self.gamepaths)
         except Exception as e:  # noqa: BLE001
             self._handle_general_exception(e, "An unexpected error occurred while loading the game directory.")
@@ -848,6 +915,7 @@ class App(tk.Tk):
         state_name = tk.NORMAL if idle else tk.DISABLED
         self.install_button.config(state=tk.NORMAL if idle and self.namespaces else tk.DISABLED)
         self.gamepaths_browse_button.config(state=state_name)
+        self.discovery_refresh_button.config(state=tk.NORMAL if idle and not self._discovery_running else tk.DISABLED)
         self.browse_button.config(state=state_name)
         self.gamepaths.config(state=state_name)
         self.namespaces_combobox.config(state="readonly" if idle and self.namespaces else tk.DISABLED)
