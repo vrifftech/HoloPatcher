@@ -209,11 +209,12 @@ class App(tk.Tk):
         self._discovery_running = False
         self._discovery_thread: Thread | None = None
 
+        self.initialize_fonts()
         self.initialize_logger()
         self.initialize_top_menu()
         self.initialize_ui_controls()
         self.set_state(False)
-        self.set_window(width=400, height=500)
+        self.set_window()
         icon_path = pathlib.Path(__file__).parent / "resources/icons/patcher_icon_v2.png"
         self._icon = tk.PhotoImage(master=self, file=str(icon_path))
         self.iconphoto(True, self._icon)
@@ -271,20 +272,91 @@ class App(tk.Tk):
     def _create_installer(self, package_root, game_path, changes_path):
         return ModInstaller(package_root, game_path, changes_path, self.logger)
 
-    def set_window(
-        self,
-        width: int,
-        height: int,
-    ):
-        # Measure the controls after layout; larger system fonts raise the minimum.
+    def initialize_fonts(self):
+        """Keep platform-derived fonts alive; never override Tk's display scaling."""
+        self._ui_font = tkfont.nametofont("TkDefaultFont", root=self).copy()
+        self._text_font = tkfont.nametofont("TkTextFont", root=self).copy()
+        self._font_sizes = (self._ui_font.cget("size"), self._text_font.cget("size"))
+        self._font_scale = 100
+        self._style = ttk.Style(self)
+        # The entry, its geometry, and the popup must use the same named font.
+        self.option_add("*TCombobox*Listbox.font", str(self._ui_font))
+        self._configure_control_styles()
+
+    def _configure_control_styles(self):
+        line_height = self._ui_font.metrics("linespace")
+        self._control_padding = max(2, line_height // 6)
+        self._style.configure("HoloPatcher.TCombobox", font=self._ui_font,
+                              padding=(self._control_padding * 2, self._control_padding))
+        self._style.configure("HoloPatcher.TButton", font=self._ui_font)
+        self._style.configure("HoloPatcher.TLabel", font=self._ui_font)
+
+    def _wrap_status(self, event):
+        """Wrap status text to the space actually allocated by the grid."""
+        padding = [self.winfo_pixels(value) for value in self.tk.splitlist(event.widget.cget("padding"))]
+        left = padding[0] if padding else 0
+        right = padding[2] if len(padding) >= 3 else left
+        width = max(1, event.width - left - right - 2)
+        if int(event.widget.cget("wraplength")) != width:
+            event.widget.configure(wraplength=width)
+
+    def _window_metrics(self):
         self.update_idletasks()
-        width = max(width, self.winfo_reqwidth())
-        height = max(height, self.winfo_reqheight())
-        self.minsize(width, height)
-        x_position = max(0, (self.winfo_screenwidth() - width) // 2)
-        y_position = max(0, (self.winfo_screenheight() - height) // 2)
-        self.geometry(f"{width}x{height}+{x_position}+{y_position}")
+        # Account for native themes whose entry field has a fixed minimum size.
+        line_height = self._ui_font.metrics("linespace")
+        for combo in (self.namespaces_combobox, self.gamepaths):
+            extra = max(0, line_height + 2 * self._control_padding - combo.winfo_reqheight())
+            combo.grid_configure(ipady=(extra + 1) // 2)
+        self.update_idletasks()
+        screen_width = self.winfo_vrootwidth() or self.winfo_screenwidth()
+        screen_height = self.winfo_vrootheight() or self.winfo_screenheight()
+        # Leave room for window decorations / desktop panels; do not impose a
+        # maxsize, so the user can still resize or move to a larger display.
+        available_width = max(1, int(screen_width * 0.90))
+        decoration_allowance = max(48, 2 * tkfont.nametofont("TkMenuFont", root=self).metrics("linespace"))
+        available_height = max(1, int(screen_height * 0.90) - decoration_allowance)
+        digit_width = self._ui_font.measure("0")
+        text_line = self._text_font.metrics("linespace")
+        chrome_height = (self._top_frame.winfo_reqheight() + self._bottom_frame.winfo_reqheight()
+                         + self._progress_frame.winfo_reqheight() + 20)
+        minimum_width = min(available_width, max(self._top_frame.winfo_reqwidth(),
+                                                self._bottom_frame.winfo_reqwidth(), 44 * digit_width))
+        minimum_height = min(available_height, chrome_height + 8 * text_line)
+        self.minsize(minimum_width, minimum_height)
+        return available_width, available_height, minimum_width, minimum_height, chrome_height
+
+    def set_window(self, width: int | None = None, height: int | None = None):
+        """Choose a readable, font-sized starting window within Tk's display bounds."""
+        available_width, available_height, minimum_width, minimum_height, chrome = self._window_metrics()
+        width = min(available_width, max(minimum_width, width or 94 * self._ui_font.measure("0")))
+        height = min(available_height, max(minimum_height, height or chrome + 22 * self._text_font.metrics("linespace")))
+        x_position = self.winfo_vrootx() + max(0, (self.winfo_vrootwidth() - width) // 2)
+        y_position = self.winfo_vrooty() + int(self.winfo_vrootheight() * 0.05) + max(0, (available_height - height) // 2)
+        self.geometry(f"{width}x{height}{x_position:+d}{y_position:+d}")
         self.resizable(width=True, height=True)
+
+    def change_font_size(self, increment: int):
+        """Resize this application's controls/text without changing system fonts."""
+        if self._closing or self._close_requested:
+            return "break"
+        scale = 100 if increment == 0 else min(200, max(80, self._font_scale + increment))
+        if scale == self._font_scale:
+            return "break"
+        self._font_scale = scale
+        for font, base_size in zip((self._ui_font, self._text_font), self._font_sizes):
+            size = max(1, round(abs(base_size) * scale / 100))
+            font.configure(size=-size if base_size < 0 else size)
+        self._log_bold_font.configure(size=self._text_font.cget("size"))
+        self._log_verbose_font.configure(size=self._text_font.cget("size"))
+        self._configure_control_styles()
+        width, height = self.winfo_width(), self.winfo_height()
+        _, _, minimum_width, minimum_height, _ = self._window_metrics()
+        # Preserve the user's size/position, growing only enough for controls.
+        # Resizing text must not reset selections or log text.
+        self.geometry(f"{max(width, minimum_width)}x{max(height, minimum_height)}")
+        self.view_menu.entryconfigure(0, state=tk.DISABLED if scale == 200 else tk.NORMAL)
+        self.view_menu.entryconfigure(1, state=tk.DISABLED if scale == 80 else tk.NORMAL)
+        return "break"
 
     def initialize_logger(self):
         self.logger = PatchLogger()
@@ -305,6 +377,22 @@ class App(tk.Tk):
         tools_menu.add_command(label="Grant owner access to selected folder...", command=self.fix_permissions)
         tools_menu.add_command(label="Create info.rte...", command=self.create_rte_content)
         self.menu_bar.add_cascade(label="Tools", menu=tools_menu)
+
+        self.view_menu = tk.Menu(self.menu_bar, tearoff=0)
+        modifier = "Command" if self.tk.call("tk", "windowingsystem") == "aqua" else "Control"
+        shortcut = "Cmd" if modifier == "Command" else "Ctrl"
+        self.view_menu.add_command(label="Larger text", accelerator=f"{shortcut}++",
+                                   command=lambda: self.change_font_size(10))
+        self.view_menu.add_command(label="Smaller text", accelerator=f"{shortcut}+-",
+                                   command=lambda: self.change_font_size(-10))
+        self.view_menu.add_command(label="Default text size", accelerator=f"{shortcut}+0",
+                                   command=lambda: self.change_font_size(0))
+        self.view_menu.add_separator()
+        self.view_menu.add_command(label="Reset window size", command=self.set_window)
+        self.menu_bar.add_cascade(label="View", menu=self.view_menu)
+        for key, increment in (("plus", 10), ("equal", 10), ("KP_Add", 10),
+                               ("minus", -10), ("KP_Subtract", -10), ("0", 0)):
+            self.bind(f"<{modifier}-{key}>", lambda event, amount=increment: self.change_font_size(amount))
 
         # Help menu
         help_menu = tk.Menu(self.menu_bar, tearoff=0)
@@ -333,24 +421,23 @@ class App(tk.Tk):
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        # Configure style for Combobox
-        ttk.Style(self).configure("TCombobox", font=("Helvetica", 10), padding=4)
-
         # Top area for comboboxes and buttons
-        top_frame: tk.Frame = tk.Frame(self)
+        top_frame = self._top_frame = ttk.Frame(self)
         top_frame.grid(row=0, column=0, sticky="ew")
         top_frame.grid_columnconfigure(0, weight=1)  # Make comboboxes expand
         top_frame.grid_columnconfigure(1, weight=0)
         top_frame.grid_columnconfigure(2, weight=0)  # Keep buttons fixed size
 
         # Setup the namespaces/changes ini combobox (selected mod)
-        self.namespaces_combobox: ttk.Combobox = ttk.Combobox(top_frame, state="readonly", style="TCombobox")
+        self.namespaces_combobox: ttk.Combobox = ttk.Combobox(
+            top_frame, state="readonly", style="HoloPatcher.TCombobox", font=self._ui_font, width=28, height=10,
+        )
         self.namespaces_combobox.grid(row=0, column=0, padx=5, pady=2, sticky="ew")
         self.namespaces_combobox.set("Select the mod to install")
         self._tooltips.append(ToolTip(self.namespaces_combobox, lambda: self.get_namespace_description()))
         self.namespaces_combobox.bind("<<ComboboxSelected>>", self.on_namespace_option_chosen)
         self.namespace_info_button = ttk.Button(
-            top_frame, text="?", width=3, takefocus=True,
+            top_frame, text="?", width=3, takefocus=True, style="HoloPatcher.TButton",
             command=self.show_namespace_description,
         )
         self.namespace_info_button.grid(row=0, column=1, padx=(0, 5), pady=2)
@@ -360,11 +447,13 @@ class App(tk.Tk):
             lambda: "Show the selected installation option's description",
         ))
         # Browse for a tslpatcher mod
-        self.browse_button: ttk.Button = ttk.Button(top_frame, text="Browse", command=self.open_mod)
+        self.browse_button: ttk.Button = ttk.Button(top_frame, text="Browse", command=self.open_mod, style="HoloPatcher.TButton")
         self.browse_button.grid(row=0, column=2, padx=5, pady=2, sticky="e")
 
         # Store all discovered KOTOR install paths
-        self.gamepaths = ttk.Combobox(top_frame, style="TCombobox")
+        self.gamepaths = ttk.Combobox(
+            top_frame, style="HoloPatcher.TCombobox", font=self._ui_font, width=28, height=10,
+        )
         self.gamepaths.set("Select your KOTOR directory path")
         self.gamepaths.grid(row=1, column=0, columnspan=2, padx=5, pady=2, sticky="ew")
         self.gamepaths["values"] = ()
@@ -372,16 +461,20 @@ class App(tk.Tk):
         self.gamepaths.bind("<Return>", self._remember_game_path)
         self.gamepaths.bind("<FocusOut>", self._remember_game_path)
         # Browse for a KOTOR path
-        self.gamepaths_browse_button = ttk.Button(top_frame, text="Browse", command=self.open_kotor)
+        self.gamepaths_browse_button = ttk.Button(top_frame, text="Browse", command=self.open_kotor, style="HoloPatcher.TButton")
         self.gamepaths_browse_button.grid(row=1, column=2, padx=5, pady=2, sticky="e")
 
-        self.discovery_status = ttk.Label(top_frame, text="Searching for game installations…", wraplength=290)
-        self.discovery_status.grid(row=2, column=0, columnspan=2, padx=5, pady=(0, 4), sticky="w")
-        self.discovery_refresh_button = ttk.Button(top_frame, text="Refresh", command=self._start_game_discovery)
+        self.discovery_status = ttk.Label(
+            top_frame, text="Searching for game installations…", style="HoloPatcher.TLabel",
+            width=1, wraplength=400, anchor="w", justify=tk.LEFT,
+        )
+        self.discovery_status.bind("<Configure>", self._wrap_status)
+        self.discovery_status.grid(row=2, column=0, columnspan=2, padx=5, pady=(0, 4), sticky="ew")
+        self.discovery_refresh_button = ttk.Button(top_frame, text="Refresh", command=self._start_game_discovery, style="HoloPatcher.TButton")
         self.discovery_refresh_button.grid(row=2, column=2, padx=5, pady=(0, 4), sticky="e")
 
         # Middle area for text and scrollbar
-        text_frame = tk.Frame(self)
+        text_frame = ttk.Frame(self)
         text_frame.grid(row=1, column=0, sticky="nsew")
         text_frame.grid_rowconfigure(1, weight=1)
         text_frame.grid_columnconfigure(0, weight=1)
@@ -391,49 +484,52 @@ class App(tk.Tk):
             text=("Preparing installation...\n"
                   "Reading configuration and assembling patch order.\n"
                   "Large mods may take a while."),
-            padding=8, justify=tk.LEFT, anchor="w", wraplength=350,
+            padding=8, justify=tk.LEFT, anchor="w", wraplength=400, width=1, style="HoloPatcher.TLabel",
         )
+        self.preparation_label.bind("<Configure>", self._wrap_status)
         self.preparation_label.grid(row=0, column=0, columnspan=2, sticky="ew")
         self.preparation_label.grid_remove()
 
         # Configure the text
-        self.main_text = tk.Text(text_frame, wrap=tk.WORD, width=44, height=16)
+        # Small natural request lets the scrollable area shrink on small screens;
+        # set_window() supplies the preferred reading area using font metrics.
+        self.main_text = tk.Text(text_frame, wrap=tk.WORD, width=1, height=1, padx=8, pady=6)
         self.main_text.grid(row=1, column=0, sticky="nsew")
         self.set_text_font(self.main_text)
-        self._log_bold_font = tkfont.Font(self, font=self.main_text.cget("font"))
+        self._log_bold_font = self._text_font.copy()
         self._log_bold_font.configure(weight="bold")
-        self._log_verbose_font = tkfont.Font(self, font=self.main_text.cget("font"))
+        self._log_verbose_font = self._text_font.copy()
         self._log_verbose_font.configure(slant="italic")
 
         # Create scrollbar for main frame
-        scrollbar = tk.Scrollbar(text_frame, command=self.main_text.yview)
+        scrollbar = ttk.Scrollbar(text_frame, command=self.main_text.yview)
         scrollbar.grid(row=1, column=1, sticky="ns")
         self.main_text.config(yscrollcommand=scrollbar.set)
 
         # Bottom area for buttons
-        bottom_frame = tk.Frame(self)
+        bottom_frame = self._bottom_frame = ttk.Frame(self)
         bottom_frame.grid(row=2, column=0, sticky="ew")
 
-        self.exit_button = ttk.Button(bottom_frame, text="Exit", command=self.handle_exit_button)
+        self.exit_button = ttk.Button(bottom_frame, text="Exit", command=self.handle_exit_button, style="HoloPatcher.TButton")
         self.exit_button.pack(side="left", padx=5, pady=5)
-        self.install_button = ttk.Button(bottom_frame, text="Install", command=self.begin_install)
+        self.install_button = ttk.Button(bottom_frame, text="Install", command=self.begin_install, style="HoloPatcher.TButton")
         self.install_button.pack(side="right", padx=5, pady=5)
         self.simple_thread_event: Event = Event()
-        progress_frame = ttk.Frame(self)
+        progress_frame = self._progress_frame = ttk.Frame(self)
         progress_frame.grid(row=3, column=0, padx=5, pady=(0, 5), sticky="ew")
         progress_frame.columnconfigure(0, weight=1)
         self.progress = ttk.Progressbar(progress_frame, mode="determinate")
         self.progress.grid(row=0, column=0, sticky="ew")
-        self.progress_label = ttk.Label(progress_frame, text="Ready")
-        self.progress_label.grid(row=1, column=0, sticky="w")
+        self.progress_label = ttk.Label(progress_frame, text="Ready", style="HoloPatcher.TLabel",
+                                        width=1, wraplength=400, anchor="w", justify=tk.LEFT)
+        self.progress_label.bind("<Configure>", self._wrap_status)
+        self.progress_label.grid(row=1, column=0, sticky="ew")
 
     def set_text_font(
         self,
         text_frame: tk.Text,
     ):
-        font_obj = tkfont.Font(font=self.main_text.cget("font"))
-        font_obj.configure(size=9)
-        text_frame.configure(font=font_obj)
+        text_frame.configure(font=self._text_font)
 
     @on_ui_thread
     def check_for_updates(self):
@@ -608,7 +704,7 @@ class App(tk.Tk):
         name = namespace.name or f"Option {index + 1}"
         self._dialog(
             "showinfo", f"Installation option {index + 1}: {name}",
-            namespace.description or "No description was provided for this option.",
+            f"{name}\n\n{namespace.description or 'No description was provided for this option.'}",
         )
 
     @on_ui_thread
@@ -1039,7 +1135,7 @@ class App(tk.Tk):
         self._log_view_active = False
         self.main_text.insert("1.0", document["content"])
         # Old RTE documents used fixed tags; current documents store their configurations.
-        defaults = {"bold": {"font": ("Arial", 12, "bold")}, "italic": {"font": ("Arial", 12, "italic")},
+        defaults = {"bold": {"font": self._log_bold_font}, "italic": {"font": self._log_verbose_font},
                     "underline": {"underline": True}, "overstrike": {"overstrike": True}}
         for tag, config in {**defaults, **document.get("tag_configs", {})}.items():
             self.main_text.tag_configure(tag, **config)
