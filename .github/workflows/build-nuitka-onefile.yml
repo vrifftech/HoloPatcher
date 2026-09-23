@@ -96,7 +96,63 @@ jobs:
           holopatcher --backend-info
           holopatcher --packaging-headless-self-test
 
-      - name: Build the one-file executable
+      - name: Build the one-file executable (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force release | Out-Null
+
+          $displayVersion = python -c 'from pathlib import Path; ns = {}; exec(Path("HoloPatcher/src/holopatcher/__init__.py").read_text(encoding="utf-8"), ns); print(ns["CURRENT_VERSION"])'
+          if ($LASTEXITCODE -ne 0) { throw "Could not read HoloPatcher version." }
+          $env:APP_VERSION = $displayVersion
+          $numericVersion = python -c 'import os; from packaging.version import Version; p = Version(os.environ["APP_VERSION"]); assert not p.epoch and len(p.release) <= 4 and all(x <= 65535 for x in p.release); print(".".join(map(str, p.release + (0,) * (4 - len(p.release)))))'
+          if ($LASTEXITCODE -ne 0) { throw "Could not encode Windows version." }
+
+          # Resolve Tcl/Tk from the selected setup-python interpreter itself. Running
+          # Nuitka under native PowerShell avoids Git Bash/MSYS DLLs influencing
+          # Windows dependency discovery.
+          $tkJson = python -c 'import json, sys, tkinter; from pathlib import Path; tcl = Path(tkinter.Tcl().eval("info library")).resolve(); root = tcl.parent; candidates = [p.resolve() for p in root.iterdir() if p.is_dir() and p.name.lower().startswith("tk") and ((p / "tk.tcl").is_file() or (p / "dialog.tcl").is_file())]; assert len(candidates) == 1, (root, candidates); print(json.dumps({"tcl": str(tcl), "tk": str(candidates[0])}))'
+          if ($LASTEXITCODE -ne 0) { throw "Could not resolve the selected Python Tcl/Tk libraries." }
+          $tk = $tkJson | ConvertFrom-Json
+          Write-Host "Tcl library: $($tk.tcl)"
+          Write-Host "Tk library:  $($tk.tk)"
+
+          $entry = "bundled-project/src/holopatcher/_packaged_entry.py"
+          $output = "HoloPatcher-$displayVersion-nuitka-${{ matrix.target }}"
+          $nuitkaArgs = @(
+            "--mode=onefile",
+            "--enable-plugin=tk-inter",
+            "--assume-yes-for-downloads",
+            "--msvc=latest",
+            "--include-package=holopatcher",
+            "--include-package=pykotor",
+            "--include-package=utility",
+            "--include-package=ply",
+            "--include-package=charset_normalizer",
+            "--include-package=defusedxml",
+            "--include-package=tkinter",
+            "--include-package-data=holopatcher",
+            "--output-dir=release",
+            "--output-filename=$output",
+            "--report=release/nuitka-${{ matrix.target }}.xml",
+            "--windows-console-mode=force",
+            "--windows-icon-from-ico=HoloPatcher/src/holopatcher/resources/icons/patcher_icon_v2.ico",
+            "--company-name=OpenKotOR",
+            "--product-name=HoloPatcher",
+            "--file-description=HoloPatcher - KOTOR mod installer",
+            "--copyright=OpenKotOR PyKotOR Tools",
+            "--file-version=$numericVersion",
+            "--product-version=$numericVersion",
+            "--tcl-library-dir=$($tk.tcl)",
+            "--tk-library-dir=$($tk.tk)"
+          )
+
+          & python -m nuitka @nuitkaArgs $entry
+          if ($LASTEXITCODE -ne 0) { throw "Nuitka failed with exit code $LASTEXITCODE." }
+
+      - name: Build the one-file executable (Linux/macOS)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -107,16 +163,6 @@ jobs:
           namespace = {}
           exec(Path("HoloPatcher/src/holopatcher/__init__.py").read_text(encoding="utf-8"), namespace)
           print(namespace["CURRENT_VERSION"])
-          PY
-          )
-          numeric_version=$(APP_VERSION="$display_version" python - <<'PY'
-          import os
-          from packaging.version import Version
-          parsed = Version(os.environ["APP_VERSION"])
-          if parsed.epoch or len(parsed.release) > 4 or any(part > 65535 for part in parsed.release):
-              raise SystemExit(f"Cannot encode Windows version: {parsed}")
-          parts = parsed.release + (0,) * (4 - len(parsed.release))
-          print(".".join(str(part) for part in parts))
           PY
           )
 
@@ -132,29 +178,51 @@ jobs:
             --include-package=ply
             --include-package=charset_normalizer
             --include-package=defusedxml
+            --include-package=tkinter
             --include-package-data=holopatcher
             --output-dir=release
             --output-filename="$output"
             --report="release/nuitka-${{ matrix.target }}.xml"
           )
 
-          if [[ "${{ runner.os }}" == Windows ]]; then
-            args+=(
-              --windows-console-mode=force
-              --windows-icon-from-ico=HoloPatcher/src/holopatcher/resources/icons/patcher_icon_v2.ico
-              --company-name=OpenKotOR
-              --product-name=HoloPatcher
-              '--file-description=HoloPatcher - KOTOR mod installer'
-              '--copyright=OpenKotOR PyKotOR Tools'
-              --file-version="$numeric_version"
-              --product-version="$numeric_version"
-            )
-          fi
-
           python -m nuitka "${args[@]}" "$entry"
 
-      - name: Locate and smoke-test the executable
-        id: artifact
+      - name: Locate and smoke-test the executable (Windows)
+        id: artifact_windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $prefix = "HoloPatcher-*-nuitka-${{ matrix.target }}*"
+          $artifacts = @(Get-ChildItem release -File -Filter $prefix | Where-Object { $_.Extension -ne ".xml" })
+          if ($artifacts.Count -ne 1) {
+            throw "Expected exactly one Nuitka executable, found $($artifacts.Count): $($artifacts.FullName -join ', ')"
+          }
+
+          $final = $artifacts[0].FullName
+          if ([IO.Path]::GetExtension($final) -ne ".exe") {
+            $renamed = [IO.Path]::ChangeExtension($final, ".exe")
+            Move-Item -LiteralPath $final -Destination $renamed
+            $final = $renamed
+          }
+
+          foreach ($argument in @("--version", "--backend-info", "--packaging-headless-self-test")) {
+            Write-Host "::group::HoloPatcher $argument"
+            & $final $argument
+            $code = $LASTEXITCODE
+            Write-Host "Native exit code: $code"
+            Write-Host "::endgroup::"
+            if ($code -ne 0) { throw "HoloPatcher $argument failed with native exit code $code." }
+          }
+
+          $sha = (Get-FileHash -LiteralPath $final -Algorithm SHA256).Hash.ToLowerInvariant()
+          $size = (Get-Item -LiteralPath $final).Length
+          "### $([IO.Path]::GetFileName($final))`n`n- Size: $size bytes`n- SHA-256: ``$sha```n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "path=$final" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Locate and smoke-test the executable (Linux/macOS)
+        id: artifact_unix
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -162,15 +230,11 @@ jobs:
           artifact=$(find release -maxdepth 1 -type f -name "$prefix*" ! -name '*.xml' | head -1)
           test -n "$artifact"
 
-          if [[ "${{ runner.os }}" == Windows ]]; then
-            final="${artifact%/*}/$(basename "$artifact" .exe).exe"
-          else
-            final="${artifact%.bin}"
-          fi
+          final="${artifact%.bin}"
           if [[ "$artifact" != "$final" ]]; then
             mv "$artifact" "$final"
           fi
-          chmod +x "$final" || true
+          chmod +x "$final"
 
           "$final" --version
           "$final" --backend-info
@@ -194,10 +258,22 @@ jobs:
 
           echo "path=$final" >> "$GITHUB_OUTPUT"
 
+      - name: Upload Nuitka diagnostics after a failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: HoloPatcher-nuitka-${{ matrix.target }}-diagnostics
+          path: |
+            release/nuitka-${{ matrix.target }}.xml
+            release/HoloPatcher-*
+          if-no-files-found: ignore
+          retention-days: 14
+
       - name: Upload the one-file executable
         uses: actions/upload-artifact@v7
         with:
-          path: ${{ steps.artifact.outputs.path }}
+          name: HoloPatcher-nuitka-${{ matrix.target }}
+          path: ${{ steps.artifact_windows.outputs.path || steps.artifact_unix.outputs.path }}
           archive: false
           if-no-files-found: error
           retention-days: 30

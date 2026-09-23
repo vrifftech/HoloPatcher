@@ -192,13 +192,44 @@ def main() -> int:
             import json
             import multiprocessing
             import sys
+            import traceback
 
 
-            def _headless_packaging_self_test() -> int:
+            def _probe(name: str, callback):
+                print(json.dumps({"probe": name, "status": "starting"}, sort_keys=True), flush=True)
+                try:
+                    detail = callback()
+                except BaseException as exc:
+                    traceback.print_exc()
+                    print(
+                        json.dumps(
+                            {
+                                "probe": name,
+                                "status": "failed",
+                                "error": f"{type(exc).__name__}: {exc}",
+                            },
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+                    raise
+                print(
+                    json.dumps({"probe": name, "status": "passed", "detail": detail}, sort_keys=True),
+                    flush=True,
+                )
+                return detail
+
+
+            def _probe_backend():
+                from holopatcher.bootstrap import backend_info
+
+                return backend_info()
+
+
+            def _probe_nss():
                 from ply import yacc
                 from pykotor.common.misc import Game
                 from pykotor.resource.formats.ncs import bytes_ncs, compile_nss, read_ncs
-                import tkinter as tk
 
                 counts = {}
                 for game in (Game.K1, Game.K2):
@@ -211,12 +242,25 @@ def main() -> int:
                     if not instructions:
                         raise RuntimeError(f"NSS compilation produced no instructions for {game}")
                     counts[game.name] = len(instructions)
+                return counts
+
+
+            def _probe_tcl():
+                import tkinter as tk
 
                 interp = tk.Tcl()
+                return {
+                    "patchlevel": interp.eval("info patchlevel"),
+                    "library": interp.eval("info library"),
+                }
+
+
+            def _headless_packaging_self_test() -> int:
                 result = {
                     "ok": True,
-                    "nss_instruction_counts": counts,
-                    "tcl": interp.eval("info patchlevel"),
+                    "backend": _probe("backend", _probe_backend),
+                    "nss_instruction_counts": _probe("nss", _probe_nss),
+                    "tcl": _probe("tcl", _probe_tcl),
                     "nuitka": "__compiled__" in globals(),
                 }
                 print(json.dumps(result, sort_keys=True), flush=True)
