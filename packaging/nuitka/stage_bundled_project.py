@@ -7,6 +7,7 @@ are not modified.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import shutil
 import subprocess
@@ -103,6 +104,95 @@ def embed_gui_icon(package_root: Path) -> None:
     app_path.write_text(source.replace(old, new, 1), encoding="utf-8")
 
 
+def rewrite_scriptdefs_for_nuitka(path: Path, *, chunk_size: int = 32) -> None:
+    """Split generated script-definition lists into small builder functions.
+
+    ``pykotor.common.scriptdefs`` is generated source containing thousands of
+    constructor expressions in four module-level list literals. Nuitka turns a
+    module body into one native initializer. On Windows, that oversized native
+    initializer can exhaust the default PE stack before the NSS compiler has
+    even parsed a script. Small builder functions preserve the exact objects and
+    order while bounding each native stack frame.
+    """
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(path))
+    lines = source.splitlines(keepends=True)
+
+    def source_segment(node: ast.AST) -> str:
+        """Slice one AST node using UTF-8 byte offsets used by CPython AST."""
+        assert hasattr(node, "lineno") and hasattr(node, "end_lineno")
+        start_line = lines[node.lineno - 1]
+        end_line = lines[node.end_lineno - 1]
+        if node.lineno == node.end_lineno:
+            encoded = start_line.encode("utf-8")
+            return encoded[node.col_offset : node.end_col_offset].decode("utf-8")
+        pieces = [start_line.encode("utf-8")[node.col_offset :].decode("utf-8")]
+        pieces.extend(lines[node.lineno : node.end_lineno - 1])
+        pieces.append(end_line.encode("utf-8")[: node.end_col_offset].decode("utf-8"))
+        return "".join(pieces)
+
+    imports: list[str] = []
+    definitions: list[tuple[str, list[str]]] = []
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            imports.append(source_segment(node))
+            continue
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.List)
+        ):
+            definitions.append(
+                (node.targets[0].id, [source_segment(element) for element in node.value.elts])
+            )
+            continue
+        raise RuntimeError(
+            f"scriptdefs.py layout changed: unsupported top-level {type(node).__name__}"
+        )
+
+    expected = ["KOTOR_CONSTANTS", "TSL_CONSTANTS", "KOTOR_FUNCTIONS", "TSL_FUNCTIONS"]
+    if [name for name, _elements in definitions] != expected:
+        raise RuntimeError(
+            "scriptdefs.py layout changed: expected "
+            + ", ".join(expected)
+            + "; found "
+            + ", ".join(name for name, _elements in definitions)
+        )
+
+    output = [
+        '"""Generated staging form with bounded native module-initializer frames."""',
+        *imports,
+        "",
+    ]
+    chunk_count = 0
+    element_count = 0
+    for name, elements in definitions:
+        builders: list[str] = []
+        element_count += len(elements)
+        for start in range(0, len(elements), chunk_size):
+            builder = f"_nuitka_build_{name.lower()}_{start // chunk_size}"
+            builders.append(builder)
+            chunk_count += 1
+            output.append(f"def {builder}():")
+            output.append("    return [")
+            for expression in elements[start : start + chunk_size]:
+                output.append("        " + expression.replace("\n", "\n        ") + ",")
+            output.append("    ]")
+            output.append("")
+
+        output.append(f"{name} = []")
+        for builder in builders:
+            output.append(f"{name}.extend({builder}())")
+        output.append("")
+
+    path.write_text("\n".join(output), encoding="utf-8")
+    print(
+        f"Rewrote {path.name}: {element_count} definitions across "
+        f"{chunk_count} bounded builders (chunk size {chunk_size})."
+    )
+
+
 def patch_ply_for_frozen_tables(staged_src: Path) -> None:
     """Use generated PLY tables instead of runtime source inspection."""
     compiler = staged_src / "pykotor/resource/formats/ncs/compiler"
@@ -173,6 +263,7 @@ def main() -> int:
 
     patch_bootstrap(output / "src/holopatcher/bootstrap.py")
     embed_gui_icon(output / "src/holopatcher")
+    rewrite_scriptdefs_for_nuitka(output / "src/pykotor/common/scriptdefs.py")
     patch_ply_for_frozen_tables(output / "src")
 
     frontend_ref = git_revision(frontend, args.frontend_ref)
@@ -226,23 +317,84 @@ def main() -> int:
                 return backend_info()
 
 
+            def _nss_phase(name: str, callback):
+                print(
+                    json.dumps(
+                        {"probe": "nss", "phase": name, "status": "starting"},
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                detail = callback()
+                print(
+                    json.dumps(
+                        {"probe": "nss", "phase": name, "status": "passed"},
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+                return detail
+
+
             def _probe_nss():
-                from ply import yacc
-                from pykotor.common.misc import Game
-                from pykotor.resource.formats.ncs import bytes_ncs, compile_nss, read_ncs
+                def load_ply():
+                    from ply import yacc
+                    return yacc
+
+                yacc = _nss_phase("import-ply", load_ply)
+
+                def load_game():
+                    from pykotor.common.misc import Game
+                    return Game
+
+                Game = _nss_phase("import-game", load_game)
+
+                def load_scriptdefs():
+                    from pykotor.common import scriptdefs
+                    return {
+                        "k1_constants": len(scriptdefs.KOTOR_CONSTANTS),
+                        "k2_constants": len(scriptdefs.TSL_CONSTANTS),
+                        "k1_functions": len(scriptdefs.KOTOR_FUNCTIONS),
+                        "k2_functions": len(scriptdefs.TSL_FUNCTIONS),
+                    }
+
+                definition_counts = _nss_phase("import-scriptdefs", load_scriptdefs)
+
+                def load_scriptlib():
+                    from pykotor.common import scriptlib
+                    return {
+                        "k1_scripts": len(scriptlib.KOTOR_LIBRARY),
+                        "k2_scripts": len(scriptlib.TSL_LIBRARY),
+                    }
+
+                library_counts = _nss_phase("import-scriptlib", load_scriptlib)
+
+                def load_ncs_api():
+                    from pykotor.resource.formats.ncs import bytes_ncs, compile_nss, read_ncs
+                    return bytes_ncs, compile_nss, read_ncs
+
+                bytes_ncs, compile_nss, read_ncs = _nss_phase("import-ncs-api", load_ncs_api)
 
                 counts = {}
                 for game in (Game.K1, Game.K2):
-                    compiled = compile_nss(
-                        "void main() { int value = 1; }",
-                        game,
-                        errorlog=yacc.NullLogger(),
-                    )
-                    instructions = read_ncs(bytes_ncs(compiled)).instructions
-                    if not instructions:
-                        raise RuntimeError(f"NSS compilation produced no instructions for {game}")
-                    counts[game.name] = len(instructions)
-                return counts
+                    def compile_one(game=game):
+                        compiled = compile_nss(
+                            "void main() { int value = 1; }",
+                            game,
+                            errorlog=yacc.NullLogger(),
+                        )
+                        instructions = read_ncs(bytes_ncs(compiled)).instructions
+                        if not instructions:
+                            raise RuntimeError(f"NSS compilation produced no instructions for {game}")
+                        return len(instructions)
+
+                    counts[game.name] = _nss_phase(f"compile-{game.name.lower()}", compile_one)
+
+                return {
+                    "definitions": definition_counts,
+                    "libraries": library_counts,
+                    "instruction_counts": counts,
+                }
 
 
             def _probe_tcl():

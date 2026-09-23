@@ -1,4 +1,4 @@
-name: Build Nuitka one-file HoloPatcher
+name: Build Nuitka HoloPatcher
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: nuitka-onefile-${{ github.ref }}
+  group: nuitka-build-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -118,6 +118,18 @@ jobs:
           Write-Host "Tcl library: $($tk.tcl)"
           Write-Host "Tk library:  $($tk.tk)"
 
+          # The generated script-definition module is exceptionally large. The staged
+          # source is split into bounded builders, and the PE stack reserve is raised
+          # as a second guard against STATUS_STACK_OVERFLOW (0xC00000FD) in compiled
+          # import/parser code. Reserve does not commit 16 MiB up front.
+          $stackFlag = "/STACK:16777216,65536"
+          if ([string]::IsNullOrWhiteSpace($env:LDFLAGS)) {
+            $env:LDFLAGS = $stackFlag
+          } else {
+            $env:LDFLAGS = "$($env:LDFLAGS) $stackFlag"
+          }
+          Write-Host "Windows linker flags: $env:LDFLAGS"
+
           $entry = "bundled-project/src/holopatcher/_packaged_entry.py"
           $output = "HoloPatcher-$displayVersion-nuitka-${{ matrix.target }}"
           $nuitkaArgs = @(
@@ -151,8 +163,8 @@ jobs:
           & python -m nuitka @nuitkaArgs $entry
           if ($LASTEXITCODE -ne 0) { throw "Nuitka failed with exit code $LASTEXITCODE." }
 
-      - name: Build the one-file executable (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Build the one-file executable (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -187,6 +199,69 @@ jobs:
 
           python -m nuitka "${args[@]}" "$entry"
 
+      - name: Build the application bundle (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+
+          display_version=$(python - <<'PY'
+          from pathlib import Path
+          namespace = {}
+          exec(Path("HoloPatcher/src/holopatcher/__init__.py").read_text(encoding="utf-8"), namespace)
+          print(namespace["CURRENT_VERSION"])
+          PY
+          )
+          bundle_version=$(APP_VERSION="$display_version" python - <<'PY'
+          import os
+          from packaging.version import Version
+
+          parsed = Version(os.environ["APP_VERSION"])
+          release = parsed.release[:3] + (0,) * (3 - len(parsed.release[:3]))
+          print(".".join(str(part) for part in release))
+          PY
+          )
+
+          entry=bundled-project/src/holopatcher/_packaged_entry.py
+          args=(
+            --mode=app
+            --enable-plugin=tk-inter
+            --assume-yes-for-downloads
+            --include-package=holopatcher
+            --include-package=pykotor
+            --include-package=utility
+            --include-package=ply
+            --include-package=charset_normalizer
+            --include-package=defusedxml
+            --include-package=tkinter
+            --include-package-data=holopatcher
+            --output-dir=release
+            --output-filename=HoloPatcher
+            --report="release/nuitka-${{ matrix.target }}.xml"
+            --macos-app-name=HoloPatcher
+            --macos-app-mode=gui
+            --macos-app-icon=HoloPatcher/src/holopatcher/resources/icons/patcher_icon_v2.icns
+            --macos-app-version="$bundle_version"
+            --macos-signed-app-name=org.openkotor.holopatcher
+            --company-name=OpenKotOR
+            --product-name=HoloPatcher
+            '--file-description=HoloPatcher - KOTOR mod installer'
+            '--copyright=OpenKotOR PyKotOR Tools'
+            --file-version="$bundle_version"
+            --product-version="$bundle_version"
+          )
+
+          python -m nuitka "${args[@]}" "$entry"
+
+          app=$(find release -maxdepth 1 -type d -name '*.app' -print -quit)
+          test -n "$app"
+          final_app="release/HoloPatcher-${display_version}-nuitka-${{ matrix.target }}.app"
+          if [[ "$app" != "$final_app" ]]; then
+            rm -rf "$final_app"
+            mv "$app" "$final_app"
+          fi
+
       - name: Locate and smoke-test the executable (Windows)
         id: artifact_windows
         if: runner.os == 'Windows'
@@ -220,9 +295,9 @@ jobs:
           "### $([IO.Path]::GetFileName($final))`n`n- Size: $size bytes`n- SHA-256: ``$sha```n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           "path=$final" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Locate and smoke-test the executable (Linux/macOS)
-        id: artifact_unix
-        if: runner.os != 'Windows'
+      - name: Locate and smoke-test the executable (Linux)
+        id: artifact_linux
+        if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
@@ -258,6 +333,47 @@ jobs:
 
           echo "path=$final" >> "$GITHUB_OUTPUT"
 
+      - name: Locate, smoke-test, and archive the app bundle (macOS)
+        id: artifact_macos
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=$(find release -maxdepth 1 -type d -name 'HoloPatcher-*-nuitka-${{ matrix.target }}.app' -print -quit)
+          test -n "$app"
+
+          executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          executable="$app/Contents/MacOS/$executable_name"
+          test -x "$executable"
+
+          "$executable" --version
+          "$executable" --backend-info
+          "$executable" --packaging-headless-self-test
+
+          count=$(find release -maxdepth 1 -type d -name 'HoloPatcher-*-nuitka-${{ matrix.target }}.app' | wc -l | tr -d ' ')
+          test "$count" = 1
+
+          archive="${app}.zip"
+          rm -f "$archive"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$archive"
+
+          python - "$app" "$archive" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import hashlib
+          import pathlib
+          import sys
+
+          app = pathlib.Path(sys.argv[1])
+          archive = pathlib.Path(sys.argv[2])
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          print(f"### {app.name}")
+          print()
+          print(f"- Archive: {archive.name}")
+          print(f"- Archive size: {archive.stat().st_size} bytes")
+          print(f"- SHA-256: `{digest}`")
+          PY
+
+          echo "path=$archive" >> "$GITHUB_OUTPUT"
+
       - name: Upload Nuitka diagnostics after a failure
         if: failure()
         uses: actions/upload-artifact@v7
@@ -269,11 +385,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-      - name: Upload the one-file executable
+      - name: Upload the Nuitka distribution
         uses: actions/upload-artifact@v7
         with:
           name: HoloPatcher-nuitka-${{ matrix.target }}
-          path: ${{ steps.artifact_windows.outputs.path || steps.artifact_unix.outputs.path }}
+          path: ${{ steps.artifact_windows.outputs.path || steps.artifact_linux.outputs.path || steps.artifact_macos.outputs.path }}
           archive: false
           if-no-files-found: error
           retention-days: 30
