@@ -1,0 +1,203 @@
+name: Build Nuitka one-file HoloPatcher
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nuitka-onefile-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PYTHONUTF8: '1'
+  PIP_DISABLE_PIP_VERSION_CHECK: '1'
+  NUITKA_VERSION: '4.2.2'
+  PYKOTOR_REPOSITORY: ${{ vars.PYKOTOR_REPOSITORY || format('{0}/PyKotor', github.repository_owner) }}
+
+jobs:
+  nuitka:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: windows-x64
+            runner: windows-2022
+          - target: linux-x86_64
+            runner: ubuntu-22.04
+          - target: macos-x86_64
+            runner: macos-15-intel
+          - target: macos-arm64
+            runner: macos-15
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+
+    steps:
+      - name: Check out HoloPatcher
+        uses: actions/checkout@v7
+        with:
+          path: HoloPatcher
+          persist-credentials: false
+
+      - name: Check out the configured PyKotor backend
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ env.PYKOTOR_REPOSITORY }}
+          ref: ${{ vars.PYKOTOR_REF }}
+          path: PyKotor
+          token: ${{ secrets.SOURCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install Linux compiler support
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes build-essential ccache patchelf tk-dev
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "Nuitka==$NUITKA_VERSION" \
+            packaging \
+            "ply>=3.11,<4" \
+            "charset-normalizer>=2,<4" \
+            "defusedxml>=0.7,<1"
+
+      - name: Stage HoloPatcher and its selected backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          python HoloPatcher/packaging/nuitka/stage_bundled_project.py \
+            --frontend-root HoloPatcher \
+            --backend-root PyKotor \
+            --output bundled-project \
+            --frontend-ref "$GITHUB_SHA"
+          python HoloPatcher/packaging/nuitka/generate_ply_tables.py \
+            --stage bundled-project
+
+      - name: Install and validate the staged application
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install ./bundled-project
+          holopatcher --version
+          holopatcher --backend-info
+          holopatcher --packaging-headless-self-test
+
+      - name: Build the one-file executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+
+          display_version=$(python - <<'PY'
+          from pathlib import Path
+          namespace = {}
+          exec(Path("HoloPatcher/src/holopatcher/__init__.py").read_text(encoding="utf-8"), namespace)
+          print(namespace["CURRENT_VERSION"])
+          PY
+          )
+          numeric_version=$(APP_VERSION="$display_version" python - <<'PY'
+          import os
+          from packaging.version import Version
+          parsed = Version(os.environ["APP_VERSION"])
+          if parsed.epoch or len(parsed.release) > 4 or any(part > 65535 for part in parsed.release):
+              raise SystemExit(f"Cannot encode Windows version: {parsed}")
+          parts = parsed.release + (0,) * (4 - len(parsed.release))
+          print(".".join(str(part) for part in parts))
+          PY
+          )
+
+          entry=bundled-project/src/holopatcher/_packaged_entry.py
+          output="HoloPatcher-${display_version}-nuitka-${{ matrix.target }}"
+          args=(
+            --mode=onefile
+            --enable-plugin=tk-inter
+            --assume-yes-for-downloads
+            --include-package=holopatcher
+            --include-package=pykotor
+            --include-package=utility
+            --include-package=ply
+            --include-package=charset_normalizer
+            --include-package=defusedxml
+            --include-package-data=holopatcher
+            --output-dir=release
+            --output-filename="$output"
+            --report="release/nuitka-${{ matrix.target }}.xml"
+          )
+
+          if [[ "${{ runner.os }}" == Windows ]]; then
+            args+=(
+              --windows-console-mode=force
+              --windows-icon-from-ico=HoloPatcher/src/holopatcher/resources/icons/patcher_icon_v2.ico
+              --company-name=OpenKotOR
+              --product-name=HoloPatcher
+              '--file-description=HoloPatcher - KOTOR mod installer'
+              '--copyright=OpenKotOR PyKotOR Tools'
+              --file-version="$numeric_version"
+              --product-version="$numeric_version"
+            )
+          fi
+
+          python -m nuitka "${args[@]}" "$entry"
+
+      - name: Locate and smoke-test the executable
+        id: artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          prefix="HoloPatcher-*-nuitka-${{ matrix.target }}"
+          artifact=$(find release -maxdepth 1 -type f -name "$prefix*" ! -name '*.xml' | head -1)
+          test -n "$artifact"
+
+          if [[ "${{ runner.os }}" == Windows ]]; then
+            final="${artifact%/*}/$(basename "$artifact" .exe).exe"
+          else
+            final="${artifact%.bin}"
+          fi
+          if [[ "$artifact" != "$final" ]]; then
+            mv "$artifact" "$final"
+          fi
+          chmod +x "$final" || true
+
+          "$final" --version
+          "$final" --backend-info
+          "$final" --packaging-headless-self-test
+
+          count=$(find release -maxdepth 1 -type f -name "$prefix*" ! -name '*.xml' | wc -l | tr -d ' ')
+          test "$count" = 1
+
+          python - "$final" >> "$GITHUB_STEP_SUMMARY" <<'PY'
+          import hashlib
+          import pathlib
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          digest = hashlib.sha256(path.read_bytes()).hexdigest()
+          print(f"### {path.name}")
+          print()
+          print(f"- Size: {path.stat().st_size} bytes")
+          print(f"- SHA-256: `{digest}`")
+          PY
+
+          echo "path=$final" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the one-file executable
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.artifact.outputs.path }}
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
