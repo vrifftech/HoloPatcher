@@ -47,7 +47,7 @@ def main() -> int:
                 "nss_compilation": "K1 and K2 passed",
                 "frozen": bool(getattr(sys, "frozen", False)),
                 "tk": app.tk.call("package", "require", "Tk"),
-                "icon_exists": (Path(__file__).parent / "resources/icons/patcher_icon_v2.png").is_file(),
+                "icon_exists": (Path(__file__).parent / "resources/icons/patcher_icon_runtime.png").is_file(),
                 "launch_directory": str(App._launch_directory()),
             }
             if not result["icon_exists"]:

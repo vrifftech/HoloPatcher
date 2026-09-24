@@ -1,4 +1,4 @@
-name: Build onefile distributions with fresh PyInstaller
+name: Build optimized distributions with fresh PyInstaller
 
 on:
   workflow_dispatch:
@@ -102,7 +102,6 @@ jobs:
       PYINSTALLER_CONFIG_DIR: ${{ github.workspace }}/.pyinstaller-config
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
       PYTHONUTF8: '1'
-      FRONTEND_BUILD_MODE: onefile
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
     steps:
       - name: Check out this HoloPatcher revision
@@ -180,11 +179,11 @@ jobs:
         with:
           source-path: _pyinstaller
           output-path: build-tools
-      - name: Build onefile Linux AppImage (UPX disabled)
+      - name: Build onedir-backed Linux AppImage (UPX disabled)
         if: runner.os == 'Linux'
         working-directory: HoloPatcher
         run: python packaging/build_distributions.py --target linux-x86_64
-      - name: Build onefile Windows/macOS distributions (UPX disabled)
+      - name: Build onefile Windows / onedir macOS distributions (UPX disabled)
         if: runner.os != 'Linux'
         working-directory: HoloPatcher
         env:
@@ -197,6 +196,23 @@ jobs:
           path: HoloPatcher/release/*
           if-no-files-found: error
           compression-level: 0
+          retention-days: 30
+      - name: Upload PyInstaller analysis
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: HoloPatcher-pyinstaller-${{ matrix.target }}-analysis
+          path: |
+            HoloPatcher/.pyinstaller-build/**/HoloPatcher/Analysis-*.toc
+            HoloPatcher/.pyinstaller-build/**/HoloPatcher/PYZ-*.toc
+            HoloPatcher/.pyinstaller-build/**/HoloPatcher/PKG-*.toc
+            HoloPatcher/.pyinstaller-build/**/HoloPatcher/EXE-*.toc
+            HoloPatcher/.pyinstaller-build/**/HoloPatcher/COLLECT-*.toc
+            HoloPatcher/.pyinstaller-build/**/HoloPatcher/warn-*.txt
+            HoloPatcher/.pyinstaller-build/**/HoloPatcher/xref-*.html
+            HoloPatcher/.pyinstaller-build/**/HoloPatcher/graph-*.dot
+          include-hidden-files: true
+          if-no-files-found: error
           retention-days: 30
       - name: Upload this job's reusable PyInstaller wheel and proof of compilation
         if: success() || failure()

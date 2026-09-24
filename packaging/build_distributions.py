@@ -19,7 +19,13 @@ from datetime import datetime, timezone
 import urllib.request
 
 from smoke_test import smoke_test
-from build_policy import require_onefile, verify_onefile_payload, verify_pyinstaller
+from build_policy import (
+    require_build_mode,
+    verify_app_bundle_payload,
+    verify_onedir_payload,
+    verify_onefile_payload,
+    verify_pyinstaller,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -55,9 +61,8 @@ def download_checked(url: str, expected_hash: str, destination: Path) -> None:
     destination.chmod(0o755)
 
 
-def freeze() -> Path:
-    require_onefile()
-    mode = "onefile"
+def freeze(mode: str) -> Path:
+    require_build_mode(mode)
     env = os.environ.copy()
     env["FRONTEND_BUILD_MODE"] = mode
     dist = ROOT / "dist" / mode
@@ -77,25 +82,25 @@ def build_appimage(payload: Path, release: Path, basename: str, *, gui: bool) ->
     appdir = ROOT / "dist/HoloPatcher.AppDir"
     if appdir.exists():
         shutil.rmtree(appdir)
-    (appdir / "usr/bin").mkdir(parents=True)
-    # AppImage is the outer container; its application payload is ONE executable.
-    verify_onefile_payload(payload)
-    shutil.copy2(payload, appdir / "usr/bin/HoloPatcher")
-    (appdir / "usr/bin/HoloPatcher").chmod(0o755)
+    payload_root = appdir / "usr/lib/HoloPatcher"
+    payload_report = verify_onedir_payload(payload)
+    shutil.copytree(payload, payload_root, symlinks=True)
+    launcher = payload_root / "HoloPatcher"
+    launcher.chmod(0o755)
     (appdir / "AppRun").write_text(
         '#!/bin/sh\nset -eu\n'
         'HERE="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"\n'
         'export APPDIR="$HERE"\n'
-        'exec "$HERE/usr/bin/HoloPatcher" "$@"\n', encoding="utf-8"
+        'exec "$HERE/usr/lib/HoloPatcher/HoloPatcher" "$@"\n', encoding="utf-8"
     )
     (appdir / "AppRun").chmod(0o755)
-    # Do not chdir: relative CLI arguments must remain relative to the caller.
+    # Keep the caller's working directory; normal GUI launch resolves the mod beside the AppImage.
     (appdir / "holopatcher.desktop").write_text(
         "[Desktop Entry]\nType=Application\nName=HoloPatcher\n"
         "Comment=KotOR mod patcher\nExec=HoloPatcher\nIcon=holopatcher\n"
         "Terminal=false\nCategories=Utility;\n", encoding="utf-8"
     )
-    icon = ROOT / "src/holopatcher/resources/icons/patcher_icon_v2.png"
+    icon = ROOT / "src/holopatcher/resources/icons/patcher_icon_runtime.png"
     shutil.copy2(icon, appdir / "holopatcher.png")
     (appdir / ".DirIcon").symlink_to("holopatcher.png")
     run(["desktop-file-validate", str(appdir / "holopatcher.desktop")])
@@ -109,7 +114,7 @@ def build_appimage(payload: Path, release: Path, basename: str, *, gui: bool) ->
     # Keep a permission-preserving copy as well as the requested .AppImage.
     with tarfile.open(release / f"{basename}.AppImage.tar.gz", "w:gz") as archive:
         archive.add(executable, arcname=executable.name)
-    return lock
+    return {"tools": lock, "payload": payload_report}
 
 
 def main() -> None:
@@ -131,7 +136,9 @@ def main() -> None:
     manifest = Path(os.environ["FRESH_PYINSTALLER_MANIFEST"]).resolve()
     # Match the PyInstaller version family supported by this application's spec.
     import PyInstaller
-    require_onefile()
+    build_mode = "onefile" if system == "Windows" else "onedir"
+    os.environ["FRONTEND_BUILD_MODE"] = build_mode
+    require_build_mode(build_mode)
     provenance = verify_pyinstaller(Path(PyInstaller.__file__).resolve().parent, PyInstaller.PLATFORM, PyInstaller.__version__)
     if not PyInstaller.__version__.startswith("6."):
         raise RuntimeError("This build integration targets PyInstaller 6.x; review the spec before upgrading its major version")
@@ -146,24 +153,26 @@ def main() -> None:
     version = version_namespace["CURRENT_VERSION"]
     basename = f"HoloPatcher-{version}-{args.target}"
     appimage_lock = None
-    frozen = freeze()
+    frozen = freeze(build_mode)
     if system == "Windows":
         onefile = frozen / "HoloPatcher.exe"
         payload_report = verify_onefile_payload(onefile)
         smoke_test(onefile, gui=gui)
         shutil.copy2(onefile, release / f"{basename}.exe")
     elif system == "Linux":
-        onefile = frozen / "HoloPatcher"
-        payload_report = verify_onefile_payload(onefile)
-        smoke_test(onefile, gui=gui)
-        appimage_lock = build_appimage(onefile, release, basename, gui=gui)
+        onedir = frozen / "HoloPatcher"
+        payload_report = verify_onedir_payload(onedir)
+        smoke_test(onedir / "HoloPatcher", gui=gui)
+        appimage_result = build_appimage(onedir, release, basename, gui=gui)
+        appimage_lock = appimage_result["tools"]
     else:
         app = frozen / "HoloPatcher.app"
-        executable = app / "Contents/MacOS/HoloPatcher"
-        payload_report = verify_onefile_payload(executable)
+        payload_report = verify_app_bundle_payload(app)
+        executable = app / payload_report["executable"]
         smoke_test(executable, gui=gui)
         run(["codesign", "--verify", "--deep", "--strict", str(app)])
-        # .app remains a bundle directory; its program is a onefile executable.
+        # The app is an onedir bundle: support libraries remain inside Contents
+        # and no PyInstaller onefile extraction occurs at launch.
         run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
              str(app), str(release / f"{basename}.app.zip")])
 

@@ -3,6 +3,7 @@ include requirements*.txt
 include CONSOLIDATED_SOURCE.md PORT_NOTES.md CLEANUP_NOTES.md
 include SOURCE_*.json
 recursive-include packaging *.py *.spec
+recursive-include src/holopatcher/resources/icons *.ico *.icns *.png
 prune tests
 prune dist
 prune .venv

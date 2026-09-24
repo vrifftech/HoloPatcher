@@ -215,7 +215,7 @@ class App(tk.Tk):
         self.initialize_ui_controls()
         self.set_state(False)
         self.set_window()
-        icon_path = pathlib.Path(__file__).parent / "resources/icons/patcher_icon_v2.png"
+        icon_path = pathlib.Path(__file__).parent / "resources/icons/patcher_icon_runtime.png"
         self._icon = tk.PhotoImage(master=self, file=str(icon_path))
         self.iconphoto(True, self._icon)
 
@@ -394,6 +394,27 @@ class App(tk.Tk):
                                ("minus", -10), ("KP_Subtract", -10), ("0", 0)):
             self.bind(f"<{modifier}-{key}>", lambda event, amount=increment: self.change_font_size(amount))
 
+        # Help menu
+        help_menu = tk.Menu(self.menu_bar, tearoff=0)
+        self.menu_bar.add_cascade(label="Help", menu=help_menu)
+
+        # DeadlyStream submenu
+        deadlystream_menu = tk.Menu(help_menu, tearoff=0)
+        deadlystream_menu.add_command(label="Discord", command=lambda: webbrowser.open_new("https://discord.gg/nDkHXfc36s"))
+        deadlystream_menu.add_command(label="Website", command=lambda: webbrowser.open_new("https://deadlystream.com"))
+        help_menu.add_cascade(label="DeadlyStream", menu=deadlystream_menu)
+
+        # Neocities submenu
+        neocities_menu = tk.Menu(help_menu, tearoff=0)
+        neocities_menu.add_command(label="Discord", command=lambda: webbrowser.open_new("https://discord.com/invite/kotor"))
+        neocities_menu.add_command(label="Website", command=lambda: webbrowser.open_new("https://kotor.neocities.org"))
+        help_menu.add_cascade(label="KOTOR Community Portal", menu=neocities_menu)
+
+        # OpenKOTOR submenu
+        openkotor_menu = tk.Menu(help_menu, tearoff=0)
+        openkotor_menu.add_command(label="Discord", command=lambda: webbrowser.open_new("https://discord.gg/YC7wBqabxA"))
+        openkotor_menu.add_command(label="Website", command=lambda: webbrowser.open_new("https://openkotor.com"))
+        help_menu.add_cascade(label="OpenKOTOR", menu=openkotor_menu)
 
     def initialize_ui_controls(self):
         # Use grid layout for main window

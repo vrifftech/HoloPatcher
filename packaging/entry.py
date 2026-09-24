@@ -1,11 +1,14 @@
-"""PyInstaller entry point; use the bundled backend rather than a source checkout."""
+"""PyInstaller GUI entry point; headless operations remain source-checkout only."""
+from __future__ import annotations
+
 import multiprocessing
-import sys
+
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    if sys.argv[1:] == ["--packaging-self-test"]:
-        from holopatcher._packaging_selftest import main
-    else:
-        from holopatcher.__main__ import main
-    raise SystemExit(main())
+    from holopatcher.bootstrap import bootstrap_backend
+
+    bootstrap_backend()
+    from holopatcher.app import main
+
+    raise SystemExit(main(None))
