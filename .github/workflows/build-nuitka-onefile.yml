@@ -134,6 +134,9 @@ jobs:
           $output = "HoloPatcher-$displayVersion-nuitka-${{ matrix.target }}"
           $nuitkaArgs = @(
             "--mode=onefile",
+            "--onefile-no-compression",
+            "--onefile-cache-mode=cached",
+            "--onefile-tempdir-spec={CACHE_DIR}/{COMPANY}/{PRODUCT}/{VERSION}",
             "--enable-plugin=tk-inter",
             "--assume-yes-for-downloads",
             "--msvc=latest",
