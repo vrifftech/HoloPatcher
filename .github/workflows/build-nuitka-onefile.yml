@@ -148,7 +148,7 @@ jobs:
             "--output-dir=release",
             "--output-filename=$output",
             "--report=release/nuitka-${{ matrix.target }}.xml",
-            "--windows-console-mode=force",
+            "--windows-console-mode=disable",
             "--windows-icon-from-ico=HoloPatcher/src/holopatcher/resources/icons/patcher_icon_v2.ico",
             "--company-name=OpenKotOR",
             "--product-name=HoloPatcher",
@@ -237,7 +237,9 @@ jobs:
             --include-package=tkinter
             --include-package-data=holopatcher
             --output-dir=release
-            --output-filename=HoloPatcher
+            # Keep the internal Mach-O name distinct from the bundled Python
+            # package directory `holopatcher` on case-insensitive macOS volumes.
+            --output-filename=HoloPatcherLauncher
             --report="release/nuitka-${{ matrix.target }}.xml"
             --macos-app-name=HoloPatcher
             --macos-app-mode=gui
@@ -281,10 +283,12 @@ jobs:
             $final = $renamed
           }
 
+          # The Windows artifact is a GUI-subsystem executable. Start-Process -Wait
+          # gives the workflow a reliable exit code without creating a console window.
           foreach ($argument in @("--version", "--backend-info", "--packaging-headless-self-test")) {
             Write-Host "::group::HoloPatcher $argument"
-            & $final $argument
-            $code = $LASTEXITCODE
+            $process = Start-Process -FilePath $final -ArgumentList @($argument) -Wait -PassThru
+            $code = $process.ExitCode
             Write-Host "Native exit code: $code"
             Write-Host "::endgroup::"
             if ($code -ne 0) { throw "HoloPatcher $argument failed with native exit code $code." }
