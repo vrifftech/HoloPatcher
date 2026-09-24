@@ -94,6 +94,7 @@ jobs:
           python -m pip install ./bundled-project
           holopatcher --version
           holopatcher --backend-info
+          holopatcher --packaging-headless-self-test
 
       - name: Build the one-file executable (Windows)
         if: runner.os == 'Windows'
@@ -139,13 +140,14 @@ jobs:
             "--enable-plugin=tk-inter",
             "--assume-yes-for-downloads",
             "--msvc=latest",
-            "--include-module=holopatcher._packaged_backend",
-            "--include-module=pykotor.resource.formats.ncs.compiler.lextab",
-            "--include-module=pykotor.resource.formats.ncs.compiler.parsetab",
-            "--noinclude-setuptools-mode=nofollow",
-            "--noinclude-pytest-mode=nofollow",
-            "--noinclude-unittest-mode=nofollow",
-            "--noinclude-IPython-mode=nofollow",
+            "--include-package=holopatcher",
+            "--include-package=pykotor",
+            "--include-package=utility",
+            "--include-package=ply",
+            "--include-package=charset_normalizer",
+            "--include-package=defusedxml",
+            "--include-package=tkinter",
+            "--include-package-data=holopatcher",
             "--output-dir=release",
             "--output-filename=$output",
             "--report=release/nuitka-${{ matrix.target }}.xml",
@@ -185,13 +187,14 @@ jobs:
             --mode=onefile
             --enable-plugin=tk-inter
             --assume-yes-for-downloads
-            --include-module=holopatcher._packaged_backend
-            --include-module=pykotor.resource.formats.ncs.compiler.lextab
-            --include-module=pykotor.resource.formats.ncs.compiler.parsetab
-            --noinclude-setuptools-mode=nofollow
-            --noinclude-pytest-mode=nofollow
-            --noinclude-unittest-mode=nofollow
-            --noinclude-IPython-mode=nofollow
+            --include-package=holopatcher
+            --include-package=pykotor
+            --include-package=utility
+            --include-package=ply
+            --include-package=charset_normalizer
+            --include-package=defusedxml
+            --include-package=tkinter
+            --include-package-data=holopatcher
             --output-dir=release
             --output-filename="$output"
             --report="release/nuitka-${{ matrix.target }}.xml"
@@ -228,13 +231,14 @@ jobs:
             --mode=app
             --enable-plugin=tk-inter
             --assume-yes-for-downloads
-            --include-module=holopatcher._packaged_backend
-            --include-module=pykotor.resource.formats.ncs.compiler.lextab
-            --include-module=pykotor.resource.formats.ncs.compiler.parsetab
-            --noinclude-setuptools-mode=nofollow
-            --noinclude-pytest-mode=nofollow
-            --noinclude-unittest-mode=nofollow
-            --noinclude-IPython-mode=nofollow
+            --include-package=holopatcher
+            --include-package=pykotor
+            --include-package=utility
+            --include-package=ply
+            --include-package=charset_normalizer
+            --include-package=defusedxml
+            --include-package=tkinter
+            --include-package-data=holopatcher
             --output-dir=release
             # Keep the internal Mach-O name distinct from the bundled Python
             # package directory `holopatcher` on case-insensitive macOS volumes.
@@ -284,7 +288,7 @@ jobs:
 
           # The Windows artifact is a GUI-subsystem executable. Start-Process -Wait
           # gives the workflow a reliable exit code without creating a console window.
-          foreach ($argument in @("--version", "--backend-info")) {
+          foreach ($argument in @("--version", "--backend-info", "--packaging-headless-self-test")) {
             Write-Host "::group::HoloPatcher $argument"
             $process = Start-Process -FilePath $final -ArgumentList @($argument) -Wait -PassThru
             $code = $process.ExitCode
@@ -316,6 +320,7 @@ jobs:
 
           "$final" --version
           "$final" --backend-info
+          "$final" --packaging-headless-self-test
 
           count=$(find release -maxdepth 1 -type f -name "$prefix*" ! -name '*.xml' | wc -l | tr -d ' ')
           test "$count" = 1
@@ -350,6 +355,7 @@ jobs:
 
           "$executable" --version
           "$executable" --backend-info
+          "$executable" --packaging-headless-self-test
 
           count=$(find release -maxdepth 1 -type d -name 'HoloPatcher-*-nuitka-${{ matrix.target }}.app' | wc -l | tr -d ' ')
           test "$count" = 1
@@ -385,16 +391,6 @@ jobs:
             release/HoloPatcher-*
           if-no-files-found: ignore
           retention-days: 14
-
-      - name: Upload the Nuitka compilation report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: HoloPatcher-nuitka-${{ matrix.target }}-report
-          path: release/nuitka-${{ matrix.target }}.xml
-          archive: false
-          if-no-files-found: ignore
-          retention-days: 30
 
       - name: Upload the Nuitka distribution
         uses: actions/upload-artifact@v7
