@@ -730,6 +730,10 @@ class App(tk.Tk):
         self._hide_tooltips()
         if self.task_running or self._close_requested:
             return
+        self.preparation_label.grid_remove()
+        self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=1, value=0)
+        self.progress_label.configure(text="Ready")
         try:
             # Load the settings from the ini changes file.
             namespace_option = self._selected_namespace()
