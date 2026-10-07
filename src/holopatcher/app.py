@@ -255,9 +255,23 @@ class App(tk.Tk):
             self.after(20, self._drain_ui_queue)
 
     @on_ui_thread
-    def _dialog(self, kind: str, *args, **kwargs):
+    def _dialog(self, kind: str, title: str, message: str, **kwargs):
+        icon, buttons, replies = {
+            "showinfo": ("info", "ok", {"ok": "ok"}),
+            "showwarning": ("warning", "ok", {"ok": "ok"}),
+            "showerror": ("error", "ok", {"ok": "ok"}),
+            "askokcancel": ("question", "okcancel", {"ok": True, "cancel": False}),
+            "askyesno": ("question", "yesno", {"yes": True, "no": False}),
+            "askyesnocancel": ("question", "yesnocancel", {"yes": True, "no": False, "cancel": None}),
+        }[kind]
         kwargs.setdefault("parent", self)
-        return getattr(messagebox, kind)(*args, **kwargs)
+        dialog = messagebox.Message(title=title, message=message, icon=icon, type=buttons, **kwargs)
+        # Use Tk-rendered message boxes so the width is configurable on every platform.
+        dialog.command = "::tk::MessageBox"
+        self.option_add("*Dialog.msg.font", str(self._ui_font))
+        self.option_add("*Dialog.msg.width", 72)
+        self.option_add("*Dialog.msg.wrapLength", 72 * self._ui_font.measure("0"))
+        return replies[str(dialog.show())]
 
     def _package_file(self, relative_path) -> CaseAwarePath:
         if self.tslpatchdata_path is None:
@@ -644,11 +658,6 @@ class App(tk.Tk):
             self.discovery_status.config(text="Search failed. Use Browse or Refresh.")
         else:
             self._discovered_game_paths = paths
-            count = sum(len(values) for values in paths.values())
-            self.discovery_status.config(text=(
-                f"Found {count} game installation{'s' if count != 1 else ''}."
-                if count else "No installations found. Use Browse."
-            ))
             self._refresh_game_path_choices()
         self.discovery_refresh_button.config(state=tk.DISABLED if self.task_running else tk.NORMAL)
 
@@ -661,7 +670,14 @@ class App(tk.Tk):
         """Filter the cached scan without changing the user's selection or text."""
         self._remember_game_path()
         paths = [path for game in self._game_path_filter for path in self._discovered_game_paths.get(game, ())]
-        self.gamepaths["values"] = tuple(dict.fromkeys([*paths, *self._manual_game_paths]))
+        discovered = {path for values in self._discovered_game_paths.values() for path in values}
+        manual_paths = [path for path in self._manual_game_paths if path not in discovered]
+        self.gamepaths["values"] = tuple(dict.fromkeys([*paths, *manual_paths]))
+        count = len(dict.fromkeys(paths))
+        self.discovery_status.config(text=(
+            f"Found {count} game installation{'s' if count != 1 else ''}."
+            if count else "No installations found. Use Browse."
+        ))
 
     def on_gamepaths_chosen(
         self,
@@ -746,8 +762,7 @@ class App(tk.Tk):
             game_number: int | None = reader.config.game_number
             if game_number:
                 game = Game(game_number)
-                # Retain the existing K2-option ordering/compatibility policy.
-                self._game_path_filter = (game, Game.K1) if game == Game.K2 else (game,)
+                self._game_path_filter = (game,)
             else:
                 self._game_path_filter = (Game.K1, Game.K2)
             self._refresh_game_path_choices()
