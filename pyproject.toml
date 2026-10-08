@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "HoloPatcher"
-version = "2.0b0"
+version = "2.0"
 description = "Standalone HoloPatcher frontend for the separately supplied audited PyKotor backend"
 requires-python = ">=3.10"
 dependencies = [
@@ -14,7 +14,7 @@ dependencies = [
 ]
 readme = "README.md"
 license = {file = "LICENSE"}
-authors = [{name = "Nicholas Hugi"}]
+authors = [{name = "OpenKotOR"}]
 
 [project.scripts]
 holopatcher = "holopatcher.__main__:main"
