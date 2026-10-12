@@ -55,9 +55,7 @@ excludes = [
     "PySide6",
     "IPython",
     "doctest",
-    "holopatcher.__main__",
     "holopatcher._packaging_selftest",
-    "holopatcher.cli",
     "pip",
     "pydoc",
     "pytest",
@@ -87,7 +85,7 @@ options = dict(
     bootloader_ignore_signals=False,
     strip=strip_enabled,
     upx=False,
-    console=not (os.name == "nt" or sys.platform == "darwin"),
+    console=sys.platform != "darwin",
     icon=str(icon) if os.name == "nt" else None,
 )
 if os.name == "nt":

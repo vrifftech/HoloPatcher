@@ -572,7 +572,12 @@ class App(tk.Tk):
         handle = kernel32.GetConsoleWindow()
         processes = (wintypes.DWORD * 2)()
         count = kernel32.GetConsoleProcessList(processes, len(processes))
-        if handle and count == 1 and processes[0] == os.getpid():
+        # Windows PyInstaller builds are onefile: launcher and worker share the console.
+        if handle and (
+            (count == 1 and processes[0] == os.getpid())
+            or (getattr(sys, "frozen", False) and count == 2
+                and set(processes) == {os.getpid(), os.getppid()})
+        ):
             user32 = ctypes.windll.user32
             user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
             user32.ShowWindow(handle, 0)

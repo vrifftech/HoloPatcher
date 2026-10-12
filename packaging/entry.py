@@ -1,4 +1,4 @@
-"""PyInstaller GUI entry point; headless operations remain source-checkout only."""
+"""PyInstaller entry point for GUI and headless CLI operations."""
 from __future__ import annotations
 
 import multiprocessing
@@ -6,9 +6,6 @@ import multiprocessing
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
-    from holopatcher.bootstrap import bootstrap_backend
+    from holopatcher.__main__ import main
 
-    bootstrap_backend()
-    from holopatcher.app import main
-
-    raise SystemExit(main(None))
+    raise SystemExit(main())
