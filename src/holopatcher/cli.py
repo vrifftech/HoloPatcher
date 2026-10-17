@@ -8,13 +8,14 @@ import sys
 from contextlib import contextmanager, nullcontext, redirect_stdout
 from configparser import Error as ConfigError
 from threading import Event
+from time import monotonic
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from holopatcher import CURRENT_VERSION, ExitCode
 from holopatcher.package import NamespaceSelectionError, load_package
 from pykotor.tools.path import CaseAwarePath
-from pykotor.tslpatcher.logger import PatchLogger
+from pykotor.tslpatcher.logger import LogType, PatchLogger
 from pykotor.tslpatcher.patcher import ModInstaller
 from pykotor.tslpatcher.reader import ConfigReader
 from pykotor.tslpatcher.uninstall import ModUninstaller
@@ -31,10 +32,15 @@ def _operation_log(root, logger: PatchLogger):
     path = pathlib.Path(root) / "installlog.txt"
     if path.is_symlink():
         raise OSError(f"The operation log cannot be a symbolic link: {path}")
-    with path.open("a", encoding="utf-8", buffering=1) as stream:
+    with path.open("a", encoding="utf-8") as stream:
+        last_flush = 0.0
         def record(message):
+            nonlocal last_flush
             stream.write(message.formatted_message + "\n")
-            stream.flush()
+            now = monotonic()
+            if message.log_type is LogType.ERROR or now - last_flush >= 1.0:
+                stream.flush()
+                last_flush = now
         observables = (logger.verbose_observable, logger.note_observable,
                        logger.warning_observable, logger.error_observable)
         for observable in observables:
@@ -93,6 +99,7 @@ def _confirm(title: str, message: str, args: Namespace, *, ordinary: bool = True
 def _validate(package: ModPackage, index: int, logger: PatchLogger) -> ExitCode:
     try:
         reader = ConfigReader.from_filepath(package.changes_path(index), logger)
+        reader.patch_data_path = package.source_path(index)
         reader.load(reader.config)
     except Exception as exc:
         logger.add_error(f"INI validation failed: {type(exc).__name__}: {exc}")
@@ -105,11 +112,12 @@ def _validate(package: ModPackage, index: int, logger: PatchLogger) -> ExitCode:
 def _install(package: ModPackage, index: int, game_path, args: Namespace,
              logger: PatchLogger, cancel: Event) -> ExitCode:
     installer = ModInstaller(package.root, game_path, package.changes_path(index), logger)
+    installer.patch_data_path = package.source_path(index)
     if installer.game is None:
         logger.add_error(f"Not a recognized game/content installation: {game_path}")
         return ExitCode.ABORT_INSTALL_UNSAFE
     try:
-        config = installer.config()
+        config = installer.config(package.config_reader)
     except ImportError as exc:
         logger.add_error(str(exc))  # A configured required resource is absent.
         return ExitCode.ABORT_INSTALL_UNSAFE
@@ -183,7 +191,8 @@ def execute_cli(args: Namespace) -> int:
     try:
         # Keep the namespace-list stdout as one JSON document; parser notes use stderr.
         with redirect_stdout(sys.stderr) if args.action == "list-namespaces" else nullcontext():
-            package = load_package(args.tslpatchdata)
+            package = load_package(args.tslpatchdata, namespace_index=args.namespace_option_index,
+                                   namespace_id=args.namespace_id)
         index = package.select(args.namespace_option_index, args.namespace_id)
         if args.action == "list-namespaces":
             print(json.dumps({
@@ -241,5 +250,5 @@ def execute_cli(args: Namespace) -> int:
     counts = (f" configured={logger.patches_configured} completed={logger.patches_completed}"
               f" skipped={logger.patches_skipped} failed={logger.patches_failed}") if args.action == "install" else ""
     print(f"[Result] action={args.action} status={status} exit_code={int(result)}{counts}"
-          f" warnings={len(logger.warnings)} errors={len(logger.errors)}", flush=True)
+          f" warnings={logger.warning_count} errors={logger.error_count}", flush=True)
     return result

@@ -16,6 +16,7 @@ from threading import Event, Lock, Thread, current_thread, main_thread
 from concurrent.futures import Future
 from functools import wraps
 from queue import Empty, Queue
+from time import monotonic
 from tkinter import filedialog, messagebox, ttk
 from tkinter import font as tkfont
 from typing import TYPE_CHECKING, Callable
@@ -193,6 +194,7 @@ class App(tk.Tk):
 
         self._log_file = None
         self._log_lock = Lock()
+        self._last_log_flush = 0.0
         self.log_level = LogLevel.WARNINGS
         self._display_log_level = LogLevel.FULL
         self._log_view_active = False
@@ -236,11 +238,22 @@ class App(tk.Tk):
 
     def _drain_ui_queue(self):
         # Bound each UI batch so a large log cannot starve input or cancellation.
+        calls = []
+        log_batch = None
         for _ in range(256):
             try:
                 future, method, args, kwargs = self._ui_queue.get_nowait()
             except Empty:
                 break
+            if method is App._append_text:
+                if log_batch is None:
+                    log_batch = []
+                    calls.append((None, App._append_text_batch, (log_batch,), {}))
+                log_batch.append(args)
+            else:
+                log_batch = None
+                calls.append((future, method, args, kwargs))
+        for future, method, args, kwargs in calls:
             try:
                 result = method(self, *args, **kwargs)
             except Exception as exc:
@@ -281,10 +294,13 @@ class App(tk.Tk):
     @on_ui_thread
     def _selected_install_paths(self):
         namespace = self._selected_namespace()
-        return self.mod_path, self.gamepaths.get(), self._package_file(namespace.changes_filepath())
+        return (self.mod_path, self.gamepaths.get(), self._package_file(namespace.changes_filepath()),
+                self._package_file(namespace.data_folderpath))
 
-    def _create_installer(self, package_root, game_path, changes_path):
-        return ModInstaller(package_root, game_path, changes_path, self.logger)
+    def _create_installer(self, package_root, game_path, changes_path, source_path):
+        installer = ModInstaller(package_root, game_path, changes_path, self.logger)
+        installer.patch_data_path = source_path
+        return installer
 
     def initialize_fonts(self):
         """Keep platform-derived fonts alive; never override Tk's display scaling."""
@@ -586,7 +602,7 @@ class App(tk.Tk):
     def uninstall_selected_mod(self):
         if not self.preinstall_validate_chosen():
             return
-        package, game_path, _ = self._selected_install_paths()
+        package, game_path, _, _ = self._selected_install_paths()
         backup_parent = Path(package, "backup")
         if not backup_parent.safe_isdir():
             self._dialog("showerror", "Backup folder empty/missing",
@@ -843,7 +859,7 @@ class App(tk.Tk):
                 requested = filedialog.askdirectory(parent=self)
             if not requested:
                 return
-            package = load_package(requested)
+            package = load_package(requested, namespace_index=namespace_index, namespace_id=namespace_id)
             index = package.select(namespace_index, namespace_id)
             reader = ConfigReader.from_filepath(package.changes_path(index))
             reader.load_settings()
@@ -978,10 +994,10 @@ class App(tk.Tk):
         except Exception as exc:
             self._handle_general_exception(exc, "Could not select the installation option")
             return
-        self._start_task("Installation", lambda: self.begin_install_thread(self.simple_thread_event, selection),
+        self._start_task("Installation", lambda: self.begin_install_thread(self.simple_thread_event, selection, reader),
                          log_path=pathlib.Path(selection[0]) / "installlog.txt", log_level=self.log_level, preparing_install=True)
 
-    def begin_install_thread(self, should_cancel_thread: Event, selection=None):
+    def begin_install_thread(self, should_cancel_thread: Event, selection=None, config_reader=None):
         """Use the admitted GUI selection and the existing worker lifecycle."""
         if selection is None:
             try:
@@ -993,12 +1009,12 @@ class App(tk.Tk):
                 self.exit_code = ExitCode.EXCEPTION_DURING_INSTALL
                 self._handle_general_exception(exc, "Could not select the installation option")
                 return
-            self._start_task("Installation", lambda: self.begin_install_thread(should_cancel_thread, selected),
+            self._start_task("Installation", lambda: self.begin_install_thread(should_cancel_thread, selected, reader),
                              log_path=pathlib.Path(selected[0]) / "installlog.txt", log_level=self.log_level, preparing_install=True)
             return
-        package_root, game_path, ini_file_path = selection
-        installer = self._create_installer(package_root, game_path, ini_file_path)
-        self._execute_mod_install(installer, should_cancel_thread)
+        package_root, game_path, ini_file_path, source_path = selection
+        installer = self._create_installer(package_root, game_path, ini_file_path, source_path)
+        self._execute_mod_install(installer, should_cancel_thread, config_reader)
 
     @on_ui_thread
     def test_reader(self):
@@ -1008,6 +1024,7 @@ class App(tk.Tk):
         try:
             namespace = self._selected_namespace()
             ini_file_path = self._package_file(namespace.changes_filepath())
+            source_path = self._package_file(namespace.data_folderpath)
             package_root = self.mod_path
         except Exception as exc:
             self._handle_general_exception(exc, "Select a mod package before validating its configuration")
@@ -1015,6 +1032,7 @@ class App(tk.Tk):
         def parse():
             try:
                 reader = ConfigReader.from_filepath(ini_file_path, self.logger)
+                reader.patch_data_path = source_path
                 reader.load(reader.config)
             except Exception as exc:
                 self.exit_code = ExitCode.INSTALL_COMPLETED_WITH_ERRORS
@@ -1073,21 +1091,28 @@ class App(tk.Tk):
         self,
         installer: ModInstaller,
         should_cancel_thread: Event,
+        config_reader: ConfigReader | None = None,
     ):
         """Executes the mod installation."""
-        confirm_msg: str = installer.config().confirm_message.strip()
+        confirm_msg: str = installer.config(config_reader).confirm_message.strip()
         if confirm_msg and confirm_msg != "N/A" and not self._dialog("askokcancel", "This mod requires confirmation", confirm_msg):
             should_cancel_thread.set()
             self.logger.add_note("Installation declined; no game files were changed.")
             return
         install_start_time: datetime = datetime.now(timezone.utc).astimezone()
         processed = 0
+        last_progress_update = 0.0
         def progress_update():
-            nonlocal processed
+            nonlocal processed, last_progress_update
             processed += 1
+            now = monotonic()
+            if now - last_progress_update >= 0.05:
+                self._post_ui(App._show_progress, processed, self.logger.patches_configured)
+                last_progress_update = now
+        try:
+            installer.install(should_cancel_thread, progress_update_func=progress_update)
+        finally:
             self._post_ui(App._show_progress, processed, self.logger.patches_configured)
-        installer.install(should_cancel_thread, progress_update_func=progress_update)
-        self._post_ui(App._show_progress, processed, self.logger.patches_configured)
         total_install_time: timedelta = datetime.now(timezone.utc).astimezone() - install_start_time
 
         days, remainder = divmod(total_install_time.total_seconds(), 24 * 60 * 60)
@@ -1101,14 +1126,16 @@ class App(tk.Tk):
             f"{int(seconds)} seconds"
         )
 
-        num_errors: int = len(self.logger.errors)
-        num_warnings: int = len(self.logger.warnings)
+        num_errors: int = self.logger.error_count
+        num_warnings: int = self.logger.warning_count
         num_patches: int = self.logger.patches_completed
         self.logger.add_note(
             f"The installation is complete with {num_errors} errors and {num_warnings} warnings.{os.linesep}"
             f"Total install time: {time_str}{os.linesep}"
             f"Total patches: {num_patches}",
         )
+        with self._log_lock:
+            self._log_file.flush()
         if should_cancel_thread.is_set():
             self.exit_code = ExitCode.ABORT_INSTALL_UNSAFE
             self._dialog("showwarning", "Installation cancelled", "Installation stopped. Review the log and backup before continuing.")
@@ -1208,7 +1235,10 @@ class App(tk.Tk):
         with self._log_lock:
             if self._log_file is not None:
                 self._log_file.write(text)
-                self._log_file.flush()
+                now = monotonic()
+                if log.log_type is LogType.ERROR or now - self._last_log_flush >= 1.0:
+                    self._log_file.flush()
+                    self._last_log_flush = now
         if self._display_log_level >= _LOG_DISPLAY_LEVELS[log.log_type]:
             self._post_ui(App._append_text, text, log.log_type)
 
@@ -1258,12 +1288,13 @@ class App(tk.Tk):
                 destination = pathlib.Path(log_path)
                 if destination.is_symlink():
                     raise OSError(f"The operation log cannot be a symbolic link: {destination}")
-                log_file = destination.open("a", encoding="utf-8", buffering=1)
+                log_file = destination.open("a", encoding="utf-8")
         except OSError as exc:
             self.exit_code = ExitCode.EXCEPTION_DURING_INSTALL
             self._handle_general_exception(exc, "Cannot open the operation log; no operation was started")
             return False
         self._log_file = log_file
+        self._last_log_flush = 0.0
         self.initialize_logger()
         self.exit_code = ExitCode.SUCCESS
         self.simple_thread_event.clear()
@@ -1350,10 +1381,16 @@ class App(tk.Tk):
         self.progress_label.configure(text=f"{completed} / {total} operations processed")
 
     def _append_text(self, text, log_type: LogType = LogType.NOTE):
+        self._append_text_batch([(text, log_type)])
+
+    def _append_text_batch(self, messages: list[tuple[str, LogType]]):
         if not self._log_view_active:
             self.clear_main_text()
+        insert_args = []
+        for text, log_type in messages:
+            insert_args.extend((text, (f"_log_{log_type.name.lower()}",)))
         self.main_text.config(state=tk.NORMAL)
-        self.main_text.insert(tk.END, text, (f"_log_{log_type.name.lower()}",))
+        self.main_text.insert(tk.END, *insert_args)
         self.main_text.see(tk.END)
         self.main_text.config(state=tk.DISABLED)
 

@@ -38,6 +38,7 @@ class ModPackage:
     data_root: CaseAwarePath
     namespaces: tuple[PatcherNamespace, ...]
     selected_index: int
+    config_reader: ConfigReader | None = None
 
     def select(self, index: int | None = None, namespace_id: str | None = None) -> int:
         if index is not None and namespace_id is not None:
@@ -56,8 +57,12 @@ class ModPackage:
     def changes_path(self, index: int) -> CaseAwarePath:
         return resolve_package_file(self.data_root, self.namespaces[index].changes_filepath())
 
+    def source_path(self, index: int) -> CaseAwarePath:
+        return resolve_package_file(self.data_root, self.namespaces[index].data_folderpath)
 
-def load_package(requested: os.PathLike | str) -> ModPackage:
+
+def load_package(requested: os.PathLike | str, *,
+                 namespace_index: int | None = None, namespace_id: str | None = None) -> ModPackage:
     """Locate the declared package and retain inner-INI selection and outer roots."""
     selected = CaseAwarePath.get_case_sensitive_path(os.path.abspath(os.path.expanduser(requested)))
     if not selected.exists():
@@ -79,6 +84,7 @@ def load_package(requested: os.PathLike | str) -> ModPackage:
     catalogue = resolve_package_file(data_root, "namespaces.ini")
     changes = selected_ini or resolve_package_file(data_root, "changes.ini")
     selected_index = 0
+    reader = None
     if catalogue.is_file():
         namespaces = NamespaceReader.from_filepath(catalogue)
         if not namespaces:
@@ -87,12 +93,14 @@ def load_package(requested: os.PathLike | str) -> ModPackage:
             path = resolve_package_file(data_root, namespace.changes_filepath())
             if not path.is_file():
                 raise FileNotFoundError(f"Namespace INI not found: {path}")
-            # Validate the declared information path without requiring or reading it.
-            resolve_package_file(data_root, namespace.rtf_filepath())
         if selected_ini is not None:
             absolute = pathlib.Path(selected_ini).resolve()
-            matches = [i for i, namespace in enumerate(namespaces)
-                       if pathlib.Path(resolve_package_file(data_root, namespace.changes_filepath())).resolve() == absolute]
+            candidates = list(range(len(namespaces)))
+            if namespace_index is not None or namespace_id is not None:
+                package = ModPackage(CaseAwarePath(root), CaseAwarePath(data_root), tuple(namespaces), selected_index)
+                candidates = [package.select(namespace_index, namespace_id)]
+            matches = [i for i in candidates
+                       if pathlib.Path(resolve_package_file(data_root, namespaces[i].changes_filepath())).resolve() == absolute]
             if len(matches) != 1:
                 raise NamespaceSelectionError("The selected INI does not identify exactly one declared namespace option.")
             selected_index = matches[0]
@@ -103,9 +111,8 @@ def load_package(requested: os.PathLike | str) -> ModPackage:
         namespace = PatcherNamespace.from_default()
         namespace.name = reader.config.window_title or changes.parents[1].name.strip() or "<< Untitled Mod Loaded >>"
         relative = pathlib.Path(changes).resolve().relative_to(pathlib.Path(data_root).resolve())
-        namespace.ini_filename = relative.name
-        namespace.data_folderpath = PurePath(relative.parent)
+        namespace.ini_filename = str(PurePath(relative))
         namespaces = [namespace]
     else:
         raise NoPackageError(f"No changes.ini or namespaces.ini found in: {data_root}")
-    return ModPackage(CaseAwarePath(root), CaseAwarePath(data_root), tuple(namespaces), selected_index)
+    return ModPackage(CaseAwarePath(root), CaseAwarePath(data_root), tuple(namespaces), selected_index, reader)
