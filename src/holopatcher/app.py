@@ -279,8 +279,8 @@ class App(tk.Tk):
         }[kind]
         kwargs.setdefault("parent", self)
         dialog = messagebox.Message(title=title, message=message, icon=icon, type=buttons, **kwargs)
-        # Use Tk-rendered message boxes so the width is configurable on every platform.
-        dialog.command = "::tk::MessageBox"
+        # Tk's custom renderer maps informational alerts to a warning icon on macOS.
+        dialog.command = "tk_messageBox" if self.tk.call("tk", "windowingsystem") == "aqua" else "::tk::MessageBox"
         self.option_add("*Dialog.msg.font", str(self._ui_font))
         self.option_add("*Dialog.msg.width", 72)
         self.option_add("*Dialog.msg.wrapLength", 72 * self._ui_font.measure("0"))
@@ -1158,6 +1158,7 @@ class App(tk.Tk):
         else:
             self._dialog("showinfo",
                 "Install complete!",
+                f"Installation completed successfully.{os.linesep*2}"
                 f"Check the logs for details on what has been done. Utilize the script in the 'uninstall' folder of the mod directory to revert these changes."
                 f"{os.linesep*2}Total install time: {time_str}"
                 f"{os.linesep}Total patches: {num_patches}",
