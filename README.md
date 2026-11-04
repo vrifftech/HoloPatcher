@@ -5,6 +5,11 @@
 HoloPatcher is a cross-platform TSLPatcher-compatible mod installer for Star Wars: Knights of the Old Republic and The Sith Lords. This repository contains the standalone frontend; patching and resource handling are provided by the PyKotOR backend checkout.
 
 
+Support is offered in the OpenKotOR Discord.
+
+[![OpenKotOR Discord](https://discordapp.com/api/guilds/739590575359262792/widget.png?style=banner2)](https://discord.gg/OpenKotOR)
+
+
 ## Goals
 
 - **Backwards Compatibility**: Match TSLPatcher's output and behavior as closely as possible.
