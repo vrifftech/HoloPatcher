@@ -779,9 +779,9 @@ class App(tk.Tk):
             reader.load_settings()
             self.log_level = reader.config.log_level
 
-            # Filter the listed games in the combobox with the mod's supported ones.
+            # Apply the requested game filter only when automatic lookup is enabled.
             game_number: int | None = reader.config.game_number
-            if game_number:
+            if reader.config.lookup_game_folder and game_number:
                 game = Game(game_number)
                 self._game_path_filter = (game,)
             else:
