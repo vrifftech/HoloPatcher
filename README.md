@@ -116,7 +116,7 @@ Modifications are defined in INI files, which specify the files to be patched, t
 
 - Adding or modifying fields in GFF files.
 - Inserting or modifying rows in 2DA files.
-- Adding or [modifying](https://github.com/OpenKotOR/PyKotor/wiki/HoloPatcher-README-for-mod-developers#tlk-replacements) entries in TLK files.
+- Adding or[modifying entries in TLK files.
 - Compiling NSS scripts into NCS bytecode without reliance on nwnnsscomp.
 - Modifying SSF sound files.
 
@@ -130,11 +130,3 @@ HoloPatcher is designed with extensibility in mind. Developers can extend its fu
 
 Contributions to the PyKotor's HoloPatcher are welcome. Whether it's adding new features, improving existing functionality, or fixing bugs, your contributions are appreciated.
 
-## Further Documentation
-
-For more detailed guides and tutorials on using HoloPatcher, refer to the following resources. These are upstream references; use the launch and CLI instructions above for this standalone checkout.
-
-- [Installing Mods with HoloPatcher](https://github.com/OpenKotOR/PyKotor/wiki/Installing-Mods-with-HoloPatcher): A step-by-step tutorial on setting up and running HoloPatcher.
-- [Advanced Configuration Options](https://github.com/OpenKotOR/PyKotor/wiki/HoloPatcher-README-for-mod-developers): Detailed descriptions of advanced features and how to use them.
-- [Mod Creation Best Practices](https://github.com/OpenKotOR/PyKotor/wiki/Mod-Creation-Best-Practices): Guidelines and tips for creating mods with HoloPatcher.
-- [Notes on Internal Workings](https://github.com/OpenKotOR/PyKotor/wiki/Explanations-on-HoloPatcher-Internal-Logic): Explanations on how HoloPatcher works internally and some key TSLPatcher logic.
