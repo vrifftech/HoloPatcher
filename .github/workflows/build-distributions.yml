@@ -189,48 +189,10 @@ jobs:
         env:
           BUILD_TARGET: ${{ matrix.target }}
         run: python packaging/build_distributions.py --target "$BUILD_TARGET"
-      - name: Upload verified application distributions
+      - name: Upload application ZIP
         uses: actions/upload-artifact@v7
         with:
-          name: HoloPatcher-${{ matrix.target }}
-          path: HoloPatcher/release/*
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 30
-      - name: Upload PyInstaller analysis
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: HoloPatcher-pyinstaller-${{ matrix.target }}-analysis
-          path: |
-            HoloPatcher/.pyinstaller-build/**/HoloPatcher/Analysis-*.toc
-            HoloPatcher/.pyinstaller-build/**/HoloPatcher/PYZ-*.toc
-            HoloPatcher/.pyinstaller-build/**/HoloPatcher/PKG-*.toc
-            HoloPatcher/.pyinstaller-build/**/HoloPatcher/EXE-*.toc
-            HoloPatcher/.pyinstaller-build/**/HoloPatcher/COLLECT-*.toc
-            HoloPatcher/.pyinstaller-build/**/HoloPatcher/warn-*.txt
-            HoloPatcher/.pyinstaller-build/**/HoloPatcher/xref-*.html
-            HoloPatcher/.pyinstaller-build/**/HoloPatcher/graph-*.dot
-          include-hidden-files: true
+          path: HoloPatcher/release/*.zip
+          archive: false
           if-no-files-found: error
           retention-days: 30
-      - name: Upload this job's reusable PyInstaller wheel and proof of compilation
-        if: success() || failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: fresh-pyinstaller-${{ matrix.target }}
-          path: build-tools/*
-          if-no-files-found: ignore
-          retention-days: 30
-      - name: Upload packaging diagnostics on failure
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: packaging-diagnostics-${{ matrix.target }}
-          path: |
-            HoloPatcher/.pyinstaller-build/**/warn-*.txt
-            HoloPatcher/.pyinstaller-build/**/xref-*.html
-            _pyinstaller/bootloader/build/config.log
-          include-hidden-files: true
-          if-no-files-found: ignore
-          retention-days: 14

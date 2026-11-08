@@ -14,9 +14,8 @@ import platform
 import shutil
 import subprocess
 import sys
-import tarfile
-from datetime import datetime, timezone
 import urllib.request
+import zipfile
 
 from smoke_test import smoke_test
 from build_policy import (
@@ -41,10 +40,6 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             result.update(block)
         return result.hexdigest()
-
-
-def checkout_commit(root: Path) -> str:
-    return subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
 
 
 def download_checked(url: str, expected_hash: str, destination: Path) -> None:
@@ -72,7 +67,7 @@ def freeze(mode: str) -> Path:
     return dist
 
 
-def build_appimage(payload: Path, release: Path, basename: str, *, gui: bool) -> dict:
+def build_appimage(payload: Path, output: Path, basename: str, *, gui: bool) -> Path:
     lock = json.loads((ROOT / "packaging/appimage-tools.json").read_text(encoding="utf-8"))
     tools = ROOT / ".packaging-tools"
     appimagetool = tools / "appimagetool-x86_64.AppImage"
@@ -83,7 +78,7 @@ def build_appimage(payload: Path, release: Path, basename: str, *, gui: bool) ->
     if appdir.exists():
         shutil.rmtree(appdir)
     payload_root = appdir / "usr/lib/HoloPatcher"
-    payload_report = verify_onedir_payload(payload)
+    verify_onedir_payload(payload)
     shutil.copytree(payload, payload_root, symlinks=True)
     launcher = payload_root / "HoloPatcher"
     launcher.chmod(0o755)
@@ -104,17 +99,14 @@ def build_appimage(payload: Path, release: Path, basename: str, *, gui: bool) ->
     shutil.copy2(icon, appdir / "holopatcher.png")
     (appdir / ".DirIcon").symlink_to("holopatcher.png")
     run(["desktop-file-validate", str(appdir / "holopatcher.desktop")])
-    executable = release / f"{basename}.AppImage"
+    executable = output / f"{basename}.AppImage"
     env = os.environ.copy()
     env.update({"ARCH": "x86_64", "APPIMAGE_EXTRACT_AND_RUN": "1"})
     # Explicit --runtime-file prevents appimagetool fetching a moving runtime.
     run([str(appimagetool), "--runtime-file", str(runtime), str(appdir), str(executable)], env=env)
     executable.chmod(0o755)
     smoke_test(executable, gui=gui, appimage=True)
-    # Keep a permission-preserving copy as well as the requested .AppImage.
-    with tarfile.open(release / f"{basename}.AppImage.tar.gz", "w:gz") as archive:
-        archive.add(executable, arcname=executable.name)
-    return {"tools": lock, "payload": payload_report}
+    return executable
 
 
 def main() -> None:
@@ -132,14 +124,12 @@ def main() -> None:
     system, machines = expected[args.target]
     if platform.system() != system or machine not in machines:
         raise RuntimeError(f"Target {args.target} does not match {platform.system()}/{machine}")
-    backend = Path(os.environ["HOLOPATCHER_PYKOTOR_ROOT"]).resolve()
-    manifest = Path(os.environ["FRESH_PYINSTALLER_MANIFEST"]).resolve()
     # Match the PyInstaller version family supported by this application's spec.
     import PyInstaller
     build_mode = "onefile" if system == "Windows" else "onedir"
     os.environ["FRONTEND_BUILD_MODE"] = build_mode
     require_build_mode(build_mode)
-    provenance = verify_pyinstaller(Path(PyInstaller.__file__).resolve().parent, PyInstaller.PLATFORM, PyInstaller.__version__)
+    verify_pyinstaller(Path(PyInstaller.__file__).resolve().parent, PyInstaller.PLATFORM, PyInstaller.__version__)
     if not PyInstaller.__version__.startswith("6."):
         raise RuntimeError("This build integration targets PyInstaller 6.x; review the spec before upgrading its major version")
     release = ROOT / "release"
@@ -152,19 +142,16 @@ def main() -> None:
     exec((ROOT / "src/holopatcher/__init__.py").read_text(encoding="utf-8"), version_namespace)
     version = version_namespace["CURRENT_VERSION"]
     basename = f"HoloPatcher-{version}-{args.target}"
-    appimage_lock = None
     frozen = freeze(build_mode)
     if system == "Windows":
-        onefile = frozen / "HoloPatcher.exe"
-        payload_report = verify_onefile_payload(onefile)
-        smoke_test(onefile, gui=gui)
-        shutil.copy2(onefile, release / f"{basename}.exe")
+        executable = frozen / "HoloPatcher.exe"
+        verify_onefile_payload(executable)
+        smoke_test(executable, gui=gui)
     elif system == "Linux":
         onedir = frozen / "HoloPatcher"
-        payload_report = verify_onedir_payload(onedir)
+        verify_onedir_payload(onedir)
         smoke_test(onedir / "HoloPatcher", gui=gui)
-        appimage_result = build_appimage(onedir, release, basename, gui=gui)
-        appimage_lock = appimage_result["tools"]
+        executable = build_appimage(onedir, frozen, basename, gui=gui)
     else:
         app = frozen / "HoloPatcher.app"
         payload_report = verify_app_bundle_payload(app)
@@ -173,28 +160,12 @@ def main() -> None:
         run(["codesign", "--verify", "--deep", "--strict", str(app)])
         # The app is an onedir bundle: support libraries remain inside Contents
         # and no PyInstaller onefile extraction occurs at launch.
-        run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent",
-             str(app), str(release / f"{basename}.app.zip")])
+        run(["ditto", "-c", "-k", "--norsrc", "--keepParent",
+             str(app), str(release / f"{basename}.zip")])
 
-    metadata = {
-        "application": "HoloPatcher", "version": version, "target": args.target,
-        "packaging_policy": payload_report,
-        "frontend_commit": checkout_commit(ROOT), "backend_commit": checkout_commit(backend),
-        "pyinstaller": provenance, "pyinstaller_version": PyInstaller.__version__,
-        "built_at_utc": datetime.now(timezone.utc).isoformat(),
-        "python": sys.version, "os": platform.platform(),
-        "macos_deployment_target": os.environ.get("MACOSX_DEPLOYMENT_TARGET") or None,
-        "appimage_tools": appimage_lock,
-        "gui_smoke_test_run": gui,
-        "signing": "No release signing credentials supplied; macOS uses PyInstaller ad-hoc signing. No notarization.",
-    }
-    (release / "build-provenance.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
-    (release / "build-environment.txt").write_text(
-        subprocess.check_output([sys.executable, "-m", "pip", "freeze", "--all"], text=True), encoding="utf-8"
-    )
-    shutil.copy2(manifest, release / "fresh-pyinstaller.json")
-    checksums = [f"{sha256(path)}  {path.name}" for path in sorted(release.iterdir()) if path.is_file()]
-    (release / "SHA256SUMS.txt").write_text("\n".join(checksums) + "\n", encoding="utf-8")
+    if system != "Darwin":
+        with zipfile.ZipFile(release / f"{basename}.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.write(executable, arcname=executable.name)
     print(f"Verified distribution files: {release}")
 
 
