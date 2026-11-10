@@ -28,7 +28,7 @@ Support is offered in the OpenKotOR Discord.
 
 ## Usage
 
-For packaged builds, check this repository's [GitHub Actions](https://github.com/vrifftech/HoloPatcher/actions) for artifacts from successful builds. Releases, when published, will appear on this repository's [releases page](https://github.com/vrifftech/HoloPatcher/releases).
+Releases, when published, will appear on this repository's [releases page](https://github.com/vrifftech/HoloPatcher/releases).
 
 The primary PyInstaller artifacts are:
 
