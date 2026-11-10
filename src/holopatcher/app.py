@@ -171,6 +171,38 @@ class HoloPatcherError(Exception):
     ...
 
 
+def _macos_original_path(path: pathlib.Path) -> pathlib.Path:
+    """Resolve an app's original location when macOS launches a translocated copy."""
+    core = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    security = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
+    core.CFURLCreateFromFileSystemRepresentation.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_bool]
+    core.CFURLCreateFromFileSystemRepresentation.restype = ctypes.c_void_p
+    core.CFURLGetFileSystemRepresentation.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_void_p, ctypes.c_long]
+    core.CFURLGetFileSystemRepresentation.restype = ctypes.c_bool
+    core.CFRelease.argtypes = [ctypes.c_void_p]
+    core.CFRelease.restype = None
+    security.SecTranslocateCreateOriginalPathForURL.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    security.SecTranslocateCreateOriginalPathForURL.restype = ctypes.c_void_p
+
+    encoded = os.fsencode(path)
+    url = core.CFURLCreateFromFileSystemRepresentation(None, encoded, len(encoded), True)
+    if not url:
+        raise OSError(f"Could not create the application URL: {path}")
+    try:
+        original = security.SecTranslocateCreateOriginalPathForURL(url, None)
+        if not original:
+            raise OSError(f"Could not resolve the original application location: {path}")
+        try:
+            buffer = ctypes.create_string_buffer(os.pathconf("/", "PC_PATH_MAX"))
+            if not core.CFURLGetFileSystemRepresentation(original, True, buffer, len(buffer)):
+                raise OSError(f"Could not read the original application path: {path}")
+            return pathlib.Path(os.fsdecode(buffer.value))
+        finally:
+            core.CFRelease(original)
+    finally:
+        core.CFRelease(url)
+
+
 def on_ui_thread(method):
     @wraps(method)
     def call(self, *args, **kwargs):
@@ -1263,7 +1295,7 @@ class App(tk.Tk):
             if sys.platform == "darwin":
                 bundle = next((p for p in executable.parents if p.suffix.lower() == ".app"), None)
                 if bundle is not None:
-                    return bundle.parent
+                    return _macos_original_path(bundle).parent
             return executable.parent
         return pathlib.Path(__file__).resolve().parents[2]
 
