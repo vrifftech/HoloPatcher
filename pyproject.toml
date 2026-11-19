@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "HoloPatcher"
-version = "2.0"
-description = "Standalone HoloPatcher frontend for the separately supplied audited PyKotor backend"
+version = "2.0.1"
+description = "HoloPatcher"
 requires-python = ">=3.10"
 dependencies = [
   "ply>=3.11,<4",
