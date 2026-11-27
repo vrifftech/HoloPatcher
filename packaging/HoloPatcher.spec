@@ -133,9 +133,9 @@ if sys.platform == "darwin":
         info_plist={
             "LSBackgroundOnly": False,
             "LSMinimumSystemVersion": os.environ.get("MACOSX_DEPLOYMENT_TARGET") or "15.0",
-            "CFBundleShortVersionString": "2.0.1",
-            "CFBundleVersion": "2.0.1",
-            "CFBundleGetInfoString": "HoloPatcher 2.0.1",
+            "CFBundleShortVersionString": "2.0.2",
+            "CFBundleVersion": "2.0.2",
+            "CFBundleGetInfoString": "HoloPatcher 2.0.2",
             "NSHighResolutionCapable": True,
         },
     )
