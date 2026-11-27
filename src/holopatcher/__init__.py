@@ -1,7 +1,7 @@
 """HoloPatcher application identity; importing the package has no startup effects."""
 from enum import IntEnum
 
-CURRENT_VERSION = "2.0.1"
+CURRENT_VERSION = "2.0.2"
 
 
 class ExitCode(IntEnum):
